@@ -3,7 +3,7 @@ set -euo pipefail
 
 DIR="/opt/dnd-recap-bot"
 if [ ! -d "$DIR" ]; then
-    git clone https://github.com/<owner>/dnd-recap-bot.git "$DIR"
+    git clone https://github.com/TJurijs/dnd-journal-recap.git "$DIR"
 fi
 
 cd "$DIR"

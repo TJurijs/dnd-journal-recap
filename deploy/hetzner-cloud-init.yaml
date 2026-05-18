@@ -8,8 +8,7 @@ packages:
 
 runcmd:
   - systemctl enable --now docker
-  - mkdir -p /opt/dnd-recap-bot
-  - git clone https://github.com/<owner>/dnd-recap-bot.git /opt/dnd-recap-bot
+  - git clone https://github.com/TJurijs/dnd-journal-recap.git /opt/dnd-recap-bot
   - cp /opt/dnd-recap-bot/.env.example /opt/dnd-recap-bot/.env
   - echo "EDIT /opt/dnd-recap-bot/.env WITH YOUR KEYS, THEN RUN: cd /opt/dnd-recap-bot && docker compose up -d" > /root/SETUP.txt
 
