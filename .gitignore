@@ -1,0 +1,47 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+.env
+.venv
+env/
+venv/
+
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+.pytest_cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Whole runtime data tree — campaign state, downloaded VODs, transcripts.
+# Don't ever commit this (private journal text, personal data, multi-GB media).
+data/
+
+.DS_Store
+
+# Local bot log (only present when running outside Docker)
+bot.log
+
+# Per-user Claude Code settings (permission allowlist, etc.) — not part of the app
+.claude/

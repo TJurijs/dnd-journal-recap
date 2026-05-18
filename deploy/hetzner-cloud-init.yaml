@@ -1,0 +1,23 @@
+#cloud-config
+package_update: true
+package_upgrade: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - git
+
+runcmd:
+  - systemctl enable --now docker
+  - mkdir -p /opt/dnd-recap-bot
+  - git clone https://github.com/<owner>/dnd-recap-bot.git /opt/dnd-recap-bot
+  - cp /opt/dnd-recap-bot/.env.example /opt/dnd-recap-bot/.env
+  - echo "EDIT /opt/dnd-recap-bot/.env WITH YOUR KEYS, THEN RUN: cd /opt/dnd-recap-bot && docker compose up -d" > /root/SETUP.txt
+
+write_files:
+  - path: /etc/motd
+    content: |
+      D&D Recap Bot host.
+      To finish setup:
+        1. nano /opt/dnd-recap-bot/.env  (paste DISCORD_BOT_TOKEN and GEMINI_API_KEY)
+        2. cd /opt/dnd-recap-bot && docker compose up -d
+        3. docker logs -f dnd-recap-bot

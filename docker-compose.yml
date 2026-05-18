@@ -1,0 +1,19 @@
+services:
+  recap-bot:
+    build: .
+    container_name: dnd-recap-bot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Force DATA_DIR=/data inside the container regardless of what `.env`
+      # says — `.env` typically has `DATA_DIR=./data` for non-Docker local
+      # runs. Without this override, the container would write to /app/data
+      # (the container's ephemeral overlay) instead of /data (the bind mount).
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

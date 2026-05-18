@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "recap-bot"
+version = "0.1.0"
+description = "D&D Session Recap Discord Bot"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.4.0",
+    "google-genai>=1.0.0",
+    "yt-dlp>=2025.1.0",
+    "PyYAML>=6.0",
+    "pydantic-settings>=2.7.0",
+    "pydantic>=2.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.25.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/recap_bot"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

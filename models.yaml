@@ -1,0 +1,11 @@
+models:
+  # /initialize: one big LLM call per artifact, full journals in context.
+  # Needs a strong long-context model — it sees ~60K tokens of journals.
+  roster_build: gemini-3.1-pro-preview
+  scratchpad_build: gemini-3.1-pro-preview
+  # /recap pipeline: per-chunk audio + summarize.
+  transcribe: gemini-3.1-flash-lite
+  summarize: gemini-3.1-pro-preview
+  # /recap incremental context updates (small input, small output).
+  update_roster: gemini-3-flash-preview
+  update_scratchpad: gemini-3-flash-preview

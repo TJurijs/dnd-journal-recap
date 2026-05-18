@@ -1,0 +1,52 @@
+import asyncio
+import logging
+
+from google import genai
+
+from recap_bot.config import settings, model_config
+from recap_bot.pipeline.cost import extract_usage, UsageInfo
+from recap_bot.storage import files as channel_files
+from recap_bot.prompts.summarize import build_summarize_prompt
+
+logger = logging.getLogger(__name__)
+
+_client: genai.Client | None = None
+
+
+def _get_client() -> genai.Client:
+    global _client
+    if _client is None:
+        _client = genai.Client(api_key=settings.gemini_api_key)
+    return _client
+
+
+async def summarize_session(job, transcript: str, style: str | None = None) -> tuple[str, UsageInfo | None]:
+    model = model_config.get("summarize")
+    channel_id = job["channel_id"]
+    meta = await channel_files.read_meta(channel_id) or {"channel_id": channel_id}
+    effective_style = style or meta.get("style") or settings.default_style
+
+    roster_text = await channel_files.read_roster(channel_id)
+    scratchpad_text = await channel_files.read_scratchpad(channel_id)
+
+    prompt = build_summarize_prompt(
+        campaign=meta,
+        roster=roster_text,
+        scratchpad=scratchpad_text,
+        style=effective_style,
+        transcript=transcript,
+    )
+
+    client = _get_client()
+    response = await asyncio.to_thread(
+        client.models.generate_content,
+        model=model,
+        contents=prompt,
+    )
+
+    journal = response.text or ""
+    if not journal:
+        raise RuntimeError("Gemini returned empty journal")
+
+    usage = extract_usage(response)
+    return journal, usage

@@ -1,0 +1,619 @@
+"""Recap pipeline: download VOD → transcribe → summarize → update context → post.
+
+Keyed by channel_id (one active job per channel). State lives in
+`pipeline.state` (in-memory). Persistent data lives in `storage.files`
+(roster/scratchpad/transcripts/journals cache) and Discord channel history
+(authoritative journals).
+"""
+
+import asyncio
+import logging
+import re
+import shutil
+import time
+from datetime import datetime
+from pathlib import Path
+
+import discord
+
+from recap_bot.config import settings, model_config
+from recap_bot.pipeline import state
+from recap_bot.pipeline.audio import extract_audio
+from recap_bot.pipeline.chunk_audio import chunk_audio
+from recap_bot.pipeline.context import update_roster, update_scratchpad
+from recap_bot.pipeline.cost import CostTracker, UsageInfo
+from recap_bot.pipeline.download import download_vod, get_vod_info
+from recap_bot.pipeline.initialize import is_initializing
+from recap_bot.pipeline.step_log import StepLog
+from recap_bot.pipeline.summarize import summarize_session
+from recap_bot.pipeline.transcribe import transcribe_chunk
+from recap_bot.storage import discord_journals, files as channel_files
+
+logger = logging.getLogger(__name__)
+
+# channel_id -> discord.Message (live DM status message)
+_status_msgs: dict[int, discord.Message] = {}
+
+# channel_id -> dict of per-step UI status
+_step_ui: dict[int, dict] = {}
+
+# Lock for Discord status message edits
+_status_lock = asyncio.Lock()
+
+# channel_id -> monotonic timestamp of last DM edit (for throttling).
+# Discord rate-limits to ~5 edits/5s; we cap to one every 2s and let the
+# next progress event coalesce the latest UI state.
+_last_status_edit: dict[int, float] = {}
+_STATUS_EDIT_INTERVAL = 2.0  # seconds between non-forced edits
+
+# channel_id -> fingerprint of step UI states at last render. Used to bypass
+# the throttle when *any* step status changes (e.g. summarize transitions
+# pending→current→done) so the user actually sees the ⏳ between steps.
+_last_status_fingerprint: dict[int, str] = {}
+
+
+def _ui_fingerprint(channel_id: int) -> str:
+    ui = _step_ui.get(channel_id, {})
+    return "|".join(f"{k}:{e.get('status', '?')}" for k, e in ui.items())
+
+# Matches the "## Session Date: YYYY-MM-DD" line in a generated journal
+_INGAME_DATE_RE = re.compile(r"##\s*Session Date:\s*(.+?)(?:\n|$)", re.IGNORECASE)
+
+STEPS = [
+    ("download", "⬇️ Download VOD"),
+    ("extract", "🎙️ Convert to MP3 (mono 16kHz)"),
+    ("cleanup", "🗑️ Delete VOD source"),
+    ("chunk", "✂️ Split MP3 into 20 chunks"),
+    ("transcribe", "📝 Transcribe (20 parallel chunks)"),
+    ("summarize", "🧠 Summarize into journal"),
+    ("update_roster", "👥 Update roster"),
+    ("update_scratchpad", "📋 Update scratchpad"),
+    ("post", "📤 Post journal to channel"),
+]
+
+
+def _init_ui(channel_id: int) -> None:
+    _step_ui[channel_id] = {
+        key: {"status": "pending", "note": "", "pct": 0, "tool": "", "cost": UsageInfo()}
+        for key, _ in STEPS
+    }
+
+
+def _mark_ui(
+    channel_id: int, key: str, status: str,
+    note: str = "", pct: int = 0,
+    tool: str = "", cost_delta: UsageInfo | None = None,
+) -> None:
+    log = _step_ui.get(channel_id)
+    if log is None:
+        return
+    entry = log.setdefault(key, {"status": "pending", "note": "", "pct": 0, "tool": "", "cost": UsageInfo()})
+    entry["status"] = status
+    entry["note"] = note
+    entry["pct"] = pct
+    if tool:
+        entry["tool"] = tool
+    if cost_delta:
+        entry["cost"] = entry["cost"] + cost_delta
+
+
+def _build_status_text(channel_id: int, total_cost: str = "", header: str = "") -> str:
+    job = state.get(channel_id)
+    title = (job.title if job else "") or f"Recap (channel {channel_id})"
+    lines = []
+    if header:
+        lines.append(header)
+        lines.append("")
+    lines.append(f"**{title}**")
+    if job and job.channel_label:
+        lines.append(f"_Source: {job.channel_label}_")
+    lines.append("")
+    for key, label in STEPS:
+        entry = _step_ui.get(channel_id, {}).get(key, {"status": "pending", "note": "", "pct": 0, "tool": "", "cost": UsageInfo()})
+        if entry["status"] == "done":
+            icon = "✅"
+            pct_text = ""
+        elif entry["status"] == "current":
+            icon = "⏳"
+            pct = entry.get("pct", 0)
+            pct_text = f" ({pct}%)" if pct > 0 else ""
+        elif entry["status"] == "skipped":
+            icon = "⏭️"
+            pct_text = ""
+        else:
+            icon = "⬜"
+            pct_text = ""
+        tool = entry.get("tool", "")
+        tool_str = f" `{tool}`" if tool else ""
+        note = f" — {entry['note']}" if entry["note"] else ""
+        cost_obj = entry.get("cost", UsageInfo())
+        cost_str = f" — {cost_obj.format_cost()}" if cost_obj.total_tokens else ""
+        lines.append(f"{icon} {label}{tool_str}{pct_text}{note}{cost_str}")
+    if total_cost:
+        lines.append("")
+        lines.append(f"💰 Total: {total_cost}")
+    return "\n".join(lines)
+
+
+async def _send_status(
+    bot, user_id: int, channel_id: int,
+    total_cost: str = "", header: str = "", *, force: bool = False,
+) -> None:
+    """Push the current step UI to the user's DM.
+
+    Always renders when a step's *status* changes (so the user sees ⏳
+    transitions). Throttled to once per 2s for within-step progress ticks so
+    we don't trip Discord's edit-rate limit.
+    """
+    fingerprint = _ui_fingerprint(channel_id)
+    state_changed = fingerprint != _last_status_fingerprint.get(channel_id)
+
+    if not force and not state_changed:
+        now = time.monotonic()
+        last = _last_status_edit.get(channel_id, 0.0)
+        if now - last < _STATUS_EDIT_INTERVAL:
+            return
+    try:
+        user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+        if not user:
+            return
+        text = _build_status_text(channel_id, total_cost=total_cost, header=header)
+        async with _status_lock:
+            msg = _status_msgs.get(channel_id)
+            if msg:
+                try:
+                    await msg.edit(content=text)
+                    _last_status_edit[channel_id] = time.monotonic()
+                    _last_status_fingerprint[channel_id] = fingerprint
+                    return
+                except Exception:
+                    pass
+            msg = await user.send(text)
+            _status_msgs[channel_id] = msg
+            _last_status_edit[channel_id] = time.monotonic()
+            _last_status_fingerprint[channel_id] = fingerprint
+    except Exception:
+        logger.exception("Failed to send status DM for channel %s", channel_id)
+
+
+def _check_cancelled(channel_id: int) -> None:
+    job = state.get(channel_id)
+    if job is not None and job.cancelled:
+        raise asyncio.CancelledError(f"Recap on channel {channel_id} stopped by user")
+
+
+def _extract_ingame_date(journal_md: str) -> str | None:
+    match = _INGAME_DATE_RE.search(journal_md)
+    return match.group(1).strip() if match else None
+
+
+_ROSTER_NAME_RE = re.compile(r"^-\s+(.+?)\s*\((Player|NPC)\)", re.MULTILINE)
+
+
+def _roster_names(roster: str) -> dict[str, str]:
+    """Map lowercase name → original line, for diffing."""
+    out: dict[str, str] = {}
+    for line in roster.splitlines():
+        m = _ROSTER_NAME_RE.match(line.strip())
+        if m:
+            out[m.group(1).strip().lower()] = line.strip()
+    return out
+
+
+def _summarize_context_diff(
+    *, old_roster: str, new_roster: str, old_scratchpad: str, new_scratchpad: str,
+) -> str:
+    """Human-readable summary of what changed in roster + scratchpad.
+
+    For roster: new character lines that didn't exist before (by name).
+    For scratchpad: the appended portion (whatever's in new but not in old).
+    """
+    out_lines: list[str] = []
+
+    old_names = _roster_names(old_roster)
+    new_names = _roster_names(new_roster)
+    added = [new_names[k] for k in new_names if k not in old_names]
+    removed = [old_names[k] for k in old_names if k not in new_names]
+
+    if added:
+        out_lines.append(f"**Roster additions ({len(added)}):**")
+        for entry in added[:20]:
+            out_lines.append(entry)
+        if len(added) > 20:
+            out_lines.append(f"_…and {len(added) - 20} more_")
+    if removed:
+        out_lines.append(f"**Roster removed ({len(removed)}):**")
+        for entry in removed[:10]:
+            out_lines.append(entry)
+
+    # Scratchpad: assume the new content is appended after the old.
+    if new_scratchpad.startswith(old_scratchpad):
+        appended = new_scratchpad[len(old_scratchpad):].strip()
+    else:
+        # The model rewrote rather than appended; show the last 1-2 non-empty
+        # lines as the "new session" entry approximation.
+        new_lines = [ln for ln in new_scratchpad.splitlines() if ln.strip()]
+        appended = "\n".join(new_lines[-2:]) if new_lines else ""
+
+    if appended:
+        out_lines.append("**Scratchpad addition:**")
+        out_lines.append(appended[:600])
+
+    if not out_lines:
+        return "_(no roster/scratchpad changes detected)_"
+    return "\n".join(out_lines)
+
+
+async def run_job(bot, channel_id: int) -> None:
+    """Run the recap pipeline for the active job on `channel_id`."""
+    job = state.get(channel_id)
+    if job is None:
+        logger.error("No active job for channel %s", channel_id)
+        return
+
+    job.status = "running"
+    job.started_at = datetime.utcnow()
+
+    user_id = job.requested_by
+    style = job.style
+
+    # Probe VOD title and duration
+    vod_duration = 0
+    try:
+        info = await get_vod_info(job.source_ref)
+        job.title = info.get("title") or f"Recap (channel {channel_id})"
+        vod_duration = info.get("duration", 0)
+    except Exception:
+        logger.exception("Failed to probe VOD info for %s", job.source_ref)
+        job.title = f"Recap (channel {channel_id})"
+
+    # Parse the Twitch VOD ID — used as the canonical reference for this recap.
+    from recap_bot.pipeline.download import get_vod_id
+    vod_id = get_vod_id(job.source_ref)
+    job.vod_id = vod_id
+
+    # One folder per VOD: new recap gets next seq, re-recap reuses the same
+    # folder (overwriting outputs but reusing audio/chunks unless --force).
+    recap_dir = channel_files.make_or_reuse_recap_dir(channel_id, vod_id)
+    chunk_cache_dir = recap_dir / "chunks"
+    cached_audio = recap_dir / "audio.mp3"
+
+    cost_tracker = CostTracker()
+    step_log = StepLog(context=f"recap#{channel_id}-vod{vod_id}", cost_tracker=cost_tracker)
+    _init_ui(channel_id)
+
+    try:
+        _check_cancelled(channel_id)
+
+        # --- Precondition: roster + scratchpad must already exist (built by /initialize) ---
+        if is_initializing(channel_id):
+            raise RuntimeError("Channel is currently being initialized. Try again when /initialize finishes.")
+
+        if not await channel_files.has_context(channel_id):
+            raise RuntimeError("Roster and scratchpad have not been initialized for this channel. Run `/initialize` first.")
+
+        # Chain from the PRIOR recap in chronology (not the latest current
+        # state). For a re-recap of game N, this means we read game N-1's
+        # snapshot — same as the original recap saw — so the new snapshot is
+        # produced from the same starting point.
+        roster_text, scratchpad_text = await channel_files.read_context_for_recap(channel_id, vod_id)
+
+        _check_cancelled(channel_id)
+
+        # --force: wipe any cached audio/chunks in this folder so we re-download.
+        if job.force:
+            if cached_audio.exists():
+                cached_audio.unlink()
+            if chunk_cache_dir.exists():
+                shutil.rmtree(chunk_cache_dir, ignore_errors=True)
+            step_log.step("cache_wipe", tool="fs", progress="done", note=f"vod={vod_id}")
+
+        skip_pipeline = False
+        if chunk_cache_dir.exists():
+            cached_chunks = sorted(chunk_cache_dir.glob("chunk_*.mp3"))
+            if len(cached_chunks) == 20:
+                step_log.step("chunk", tool="cache", progress="skipped", note=f"{len(cached_chunks)} cached chunks vod={vod_id}")
+                for k in ("download", "extract", "cleanup"):
+                    _mark_ui(channel_id, k, "skipped", "cached", tool="cache")
+                _mark_ui(channel_id, "chunk", "skipped", "20 chunks cached", tool="cache")
+                await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+                chunk_paths = cached_chunks
+                skip_pipeline = True
+
+        if not skip_pipeline:
+            if cached_audio.exists():
+                step_log.step("download", tool="cache", progress="skipped", note=f"cached audio vod={vod_id}")
+                for k in ("download", "extract", "cleanup"):
+                    _mark_ui(channel_id, k, "skipped", "cached", tool="cache")
+                await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+                audio_path = cached_audio
+            else:
+                _mark_ui(channel_id, "download", "current", tool="yt-dlp")
+                await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+
+                progress_queue: asyncio.Queue = asyncio.Queue()
+                download_task = asyncio.create_task(
+                    download_vod(job.source_ref, recap_dir, channel_id, progress_queue=progress_queue)
+                )
+
+                last_pct = 0
+                while not download_task.done():
+                    try:
+                        pct = await asyncio.wait_for(progress_queue.get(), timeout=2.0)
+                        if pct >= last_pct:
+                            last_pct = pct
+                            _mark_ui(channel_id, "download", "current", f"{pct}%", pct=pct, tool="yt-dlp")
+                            await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+                            step_log.step("download", tool="yt-dlp", progress=f"{pct}%")
+                    except asyncio.TimeoutError:
+                        pass
+                    # Poll cancel between progress ticks so we can abort a
+                    # multi-minute download within a couple seconds of /stop.
+                    job_state = state.get(channel_id)
+                    if job_state is not None and job_state.cancelled:
+                        download_task.cancel()
+                        try:
+                            await download_task
+                        except BaseException:
+                            pass
+                        raise asyncio.CancelledError(f"Cancelled during download on channel {channel_id}")
+
+                _check_cancelled(channel_id)
+                source_path = await download_task
+                _mark_ui(channel_id, "download", "done", note=source_path.name, tool="yt-dlp")
+                step_log.step("download", tool="yt-dlp", progress="done", note=source_path.name)
+
+                _mark_ui(channel_id, "extract", "current", tool="ffmpeg")
+                await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+
+                async def _extract_progress(pct: int):
+                    _mark_ui(channel_id, "extract", "current", f"{pct}%", pct=pct, tool="ffmpeg")
+                    await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+
+                audio_path = await extract_audio(source_path, recap_dir, duration=vod_duration, progress_cb=_extract_progress)
+                _mark_ui(channel_id, "extract", "done", tool="ffmpeg")
+                step_log.step("extract", tool="ffmpeg", progress="done")
+
+                # extract_audio writes audio.mp3 directly to recap_dir; rename
+                # to the canonical name we use elsewhere.
+                if audio_path != cached_audio:
+                    audio_path.replace(cached_audio)
+                    audio_path = cached_audio
+
+                _mark_ui(channel_id, "cleanup", "current", tool="fs")
+                await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+                if source_path.exists():
+                    size_mb = source_path.stat().st_size / (1024 * 1024)
+                    source_path.unlink(missing_ok=True)
+                    _mark_ui(channel_id, "cleanup", "done", note=f"freed {size_mb:.1f} MB", tool="fs")
+                    step_log.step("cleanup", tool="fs", progress="done", note=f"freed {size_mb:.1f} MB")
+                else:
+                    _mark_ui(channel_id, "cleanup", "done", note="already removed", tool="fs")
+                    step_log.step("cleanup", tool="fs", progress="done", note="already removed")
+
+            async def _chunk_progress(current: int, total: int):
+                pct = int(current / total * 100)
+                _mark_ui(channel_id, "chunk", "current", f"chunk {current}/{total}", pct=pct, tool="ffmpeg")
+                await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+
+            _mark_ui(channel_id, "chunk", "current", tool="ffmpeg")
+            await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+            # chunk_audio writes chunk_*.mp3 directly into chunk_cache_dir, which
+            # is `recap_dir/chunks/` — no separate copy step needed.
+            chunk_paths = await chunk_audio(audio_path, chunk_cache_dir, num_chunks=20, progress_cb=_chunk_progress)
+            _mark_ui(channel_id, "chunk", "done", f"{len(chunk_paths)} chunks", pct=100, tool="ffmpeg")
+            step_log.step("chunk", tool="ffmpeg", progress="done", note=f"{len(chunk_paths)} chunks")
+
+        _check_cancelled(channel_id)
+
+        # --- Step 5: Transcribe (parallel with semaphore) ---
+        transcribe_model = model_config.get("transcribe")
+        _mark_ui(channel_id, "transcribe", "current", tool=transcribe_model)
+        await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+
+        total_chunks = len(chunk_paths)
+        transcript_parts: list[str | None] = [None] * total_chunks
+        completed_count = 0
+
+        # All 20 chunks fire in parallel (one Gemini call per chunk).
+        semaphore = asyncio.Semaphore(20)
+
+        async def _bounded_transcribe(idx: int, chunk_path: Path):
+            async with semaphore:
+                part, usage = await transcribe_chunk(chunk_path)
+                return idx, part, usage
+
+        tasks = [asyncio.create_task(_bounded_transcribe(i, cp)) for i, cp in enumerate(chunk_paths)]
+
+        for coro in asyncio.as_completed(tasks):
+            idx, part, usage = await coro
+            transcript_parts[idx] = part
+            completed_count += 1
+            pct = int(completed_count / total_chunks * 100)
+            _mark_ui(
+                channel_id, "transcribe", "current",
+                note=f"{completed_count}/{total_chunks} chunks",
+                pct=pct, tool=transcribe_model, cost_delta=usage,
+            )
+            await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+            step_log.step("transcribe", model=transcribe_model, progress=f"{completed_count}/{total_chunks} ({pct}%)", usage=usage)
+
+        transcript = "\n\n".join(part for part in transcript_parts if part)
+        _mark_ui(
+            channel_id, "transcribe", "done",
+            note=f"{total_chunks} chunks",
+            pct=100, tool=transcribe_model,
+        )
+        step_log.step("transcribe", model=transcribe_model, progress="done", note=f"{total_chunks} chunks")
+
+        # Persist transcript inside this run's recap folder.
+        channel_files.write_text_atomic(recap_dir / "transcript.txt", transcript)
+
+        _check_cancelled(channel_id)
+
+        # --- Step 6: Summarize ---
+        summarize_model = model_config.get("summarize")
+        _mark_ui(channel_id, "summarize", "current", tool=summarize_model)
+        await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+        # summarize_session signature still expects a dict-like job
+        summarize_job_arg = {
+            "channel_id": channel_id,
+            "guild_id": job.guild_id,
+            "requested_by": job.requested_by,
+            "source_type": job.source_type,
+            "source_ref": job.source_ref,
+            "style": style,
+        }
+        journal_md, usage = await summarize_session(summarize_job_arg, transcript, style=style)
+        # Prepend the VOD title so the journal is self-identifying (visible in the file,
+        # the Discord attachment, and any future re-use of the journal text).
+        if job.title:
+            journal_md = f"# {job.title}\n\n{journal_md}"
+        _mark_ui(channel_id, "summarize", "done", tool=summarize_model, cost_delta=usage)
+        step_log.step("summarize", model=summarize_model, progress="done", usage=usage)
+
+        _check_cancelled(channel_id)
+
+        # --- Step 7: Update roster & scratchpad (parallel) ---
+        roster_model = model_config.get("update_roster")
+        scratch_model = model_config.get("update_scratchpad")
+        _mark_ui(channel_id, "update_roster", "current", tool=roster_model)
+        _mark_ui(channel_id, "update_scratchpad", "current", tool=scratch_model)
+        await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+        (new_roster, roster_usage), (new_scratchpad, scratch_usage) = await asyncio.gather(
+            update_roster(roster_text, journal_md),
+            update_scratchpad(scratchpad_text, journal_md),
+        )
+        _mark_ui(
+            channel_id, "update_roster", "done",
+            note=f"{len(new_roster):,} chars",
+            tool=roster_model, cost_delta=roster_usage,
+        )
+        _mark_ui(
+            channel_id, "update_scratchpad", "done",
+            note=f"{len(new_scratchpad):,} chars",
+            tool=scratch_model, cost_delta=scratch_usage,
+        )
+        step_log.step("update_roster", model=roster_model, progress="done", usage=roster_usage, note=f"{len(new_roster)} chars")
+        step_log.step("update_scratchpad", model=scratch_model, progress="done", usage=scratch_usage, note=f"{len(new_scratchpad)} chars")
+
+        # Write all artifacts into THIS recap's folder. The next /recap reads
+        # roster.md/scratchpad.md from here as the chained "current" state.
+        channel_files.write_text_atomic(recap_dir / "journal.md", journal_md)
+        channel_files.write_text_atomic(recap_dir / "roster.md", new_roster)
+        channel_files.write_text_atomic(recap_dir / "scratchpad.md", new_scratchpad)
+
+        # --- Step 8: Post journal to Discord ---
+        _mark_ui(channel_id, "post", "current", tool="discord")
+        await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
+        in_game_date = _extract_ingame_date(journal_md) or datetime.utcnow().strftime("%Y-%m-%d")
+        await discord_journals.post_journal(
+            bot, channel_id, journal_md,
+            vod_id=vod_id, title=job.title, date=in_game_date,
+        )
+        # The journal we just posted IS a new channel entry; bump the synced count
+        # so the next /recap's sanity check stays accurate.
+        meta = await channel_files.read_meta(channel_id) or {}
+        await channel_files.write_meta(
+            channel_id,
+            journals_synced=int(meta.get("journals_synced", 0)) + 1,
+        )
+        _mark_ui(channel_id, "post", "done", note=f"VOD {vod_id}", tool="discord")
+        step_log.step("post", tool="discord", progress="done", note=f"VOD {vod_id}")
+
+        job.status = "done"
+        job.completed_at = datetime.utcnow()
+        step_log.total(status="done")
+
+        # Diff old vs new roster/scratchpad so the user can see what changed.
+        changes = _summarize_context_diff(
+            old_roster=roster_text,
+            new_roster=new_roster,
+            old_scratchpad=scratchpad_text,
+            new_scratchpad=new_scratchpad,
+        )
+        await _finish_status(
+            bot, user_id, channel_id,
+            success=True,
+            total_cost=cost_tracker.format_total(),
+            changes=changes,
+        )
+
+    except asyncio.CancelledError:
+        job.status = "cancelled"
+        job.completed_at = datetime.utcnow()
+        step_log.total(status="cancelled")
+        await _finish_status(bot, user_id, channel_id, success=False, error="Stopped by user", total_cost=cost_tracker.format_total())
+    except Exception as exc:
+        logger.exception("Recap failed on channel %s", channel_id)
+        job.status = "failed"
+        job.error = str(exc)
+        job.completed_at = datetime.utcnow()
+        step_log.total(status="failed")
+        await _finish_status(bot, user_id, channel_id, success=False, error=str(exc), total_cost=cost_tracker.format_total())
+        await _try_notify_failure(bot, job, str(exc))
+    finally:
+        _status_msgs.pop(channel_id, None)
+        _step_ui.pop(channel_id, None)
+        _last_status_edit.pop(channel_id, None)
+        _last_status_fingerprint.pop(channel_id, None)
+        # recap_dir is PERSISTENT (audit + cache); nothing to clean up here.
+        # Release the channel slot so the next /recap can run.
+        state.release(channel_id)
+
+
+async def _finish_status(
+    bot, user_id: int, channel_id: int,
+    *,
+    success: bool,
+    error: str = "",
+    total_cost: str = "",
+    changes: str = "",
+) -> None:
+    msg = _status_msgs.pop(channel_id, None)
+    if not msg:
+        return
+    job = state.get(channel_id)
+    title = (job.title if job else "") or f"Recap (channel {channel_id})"
+    try:
+        if success:
+            header = f"✅ **{title} complete!**\nCheck the channel for the journal."
+        else:
+            header = f"❌ **{title} failed:**\n{error[:1000]}"
+        text = _build_status_text(channel_id, total_cost=total_cost, header=header)
+        if changes:
+            text += f"\n\n{changes}"
+        # Discord caps message content at 2000 chars; truncate defensively.
+        if len(text) > 1990:
+            text = text[:1980] + "\n… (truncated)"
+        await msg.edit(content=text)
+    except Exception:
+        logger.exception("Failed to finish status for channel %s", channel_id)
+        try:
+            user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+            if user:
+                content = (
+                    f"✅ {title} complete! Check the channel for the journal."
+                    if success
+                    else f"❌ {title} failed: {error[:1000]}"
+                )
+                if total_cost:
+                    content += f"\n💰 Total API cost: {total_cost}"
+                if changes and success:
+                    content += f"\n\n{changes[:1000]}"
+                await user.send(content[:1990])
+        except Exception:
+            logger.exception("Failed to send fallback DM for channel %s", channel_id)
+
+
+async def _try_notify_failure(bot, job: state.ActiveJob, error: str) -> None:
+    try:
+        user = bot.get_user(job.requested_by) or await bot.fetch_user(job.requested_by)
+        if user:
+            await user.send(f"❌ Recap failed: {error[:500]}")
+    except Exception:
+        logger.exception("Failed to send failure DM")
+
+
+def cancel_job(channel_id: int) -> bool:
+    return state.cancel(channel_id)
