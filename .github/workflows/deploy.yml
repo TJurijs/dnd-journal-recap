@@ -1,0 +1,53 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # allow manual re-trigger from the Actions tab
+
+# Serialize deploys: never run two at once, but don't cancel an in-flight one.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install package + dev deps
+        run: pip install -e ".[dev]"
+
+      - name: Run pytest
+        env:
+          DISCORD_BOT_TOKEN: dummy
+          GEMINI_API_KEY: dummy
+        run: pytest tests/ -q
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH into Hetzner and update the bot
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.HETZNER_HOST }}
+          username: ${{ secrets.HETZNER_USER }}
+          key: ${{ secrets.HETZNER_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd /opt/dnd-recap-bot
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose up -d --build
+            echo "=== container status ==="
+            docker compose ps
+            echo "=== last 10 log lines ==="
+            docker logs --tail 10 dnd-recap-bot
