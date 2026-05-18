@@ -10,7 +10,7 @@ runcmd:
   - systemctl enable --now docker
   - git clone https://github.com/TJurijs/dnd-journal-recap.git /opt/dnd-recap-bot
   - cp /opt/dnd-recap-bot/.env.example /opt/dnd-recap-bot/.env
-  - echo "EDIT /opt/dnd-recap-bot/.env WITH YOUR KEYS, THEN RUN: cd /opt/dnd-recap-bot && docker compose up -d" > /root/SETUP.txt
+  - "echo 'Edit /opt/dnd-recap-bot/.env, then run: cd /opt/dnd-recap-bot && docker compose up -d' > /root/SETUP.txt"
 
 write_files:
   - path: /etc/motd
