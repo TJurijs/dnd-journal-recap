@@ -20,6 +20,10 @@ from discord import app_commands
 from google import genai
 
 from recap_bot.bot import bot
+from recap_bot.commands._helpers import (
+    MANAGE_CHANNELS_REQUIRED_MSG,
+    user_has_manage_channels_anywhere,
+)
 from recap_bot.config import model_config, settings
 
 logger = logging.getLogger(__name__)
@@ -82,8 +86,11 @@ def _models_summary() -> str:
 
 @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
 @app_commands.allowed_installs(guilds=True, users=False)
-@bot.tree.command(name="check", description="Run basic setup checks (DM only)")
+@bot.tree.command(name="check", description="Run basic setup checks (DM only, Manage Channels)")
 async def check(interaction: discord.Interaction):
+    if not await user_has_manage_channels_anywhere(bot, interaction.user.id):
+        await interaction.response.send_message(MANAGE_CHANNELS_REQUIRED_MSG, ephemeral=True)
+        return
     await interaction.response.defer(ephemeral=True)
 
     results: list[str] = []

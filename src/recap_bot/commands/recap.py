@@ -18,6 +18,7 @@ _TWITCH_RE = re.compile(r"https?://(?:www\.)?twitch\.tv/(?:[^/]+/)?videos/(\d+)"
     name="recap",
     description="Generate a session recap from a Twitch VOD",
 )
+@app_commands.default_permissions(manage_channels=True)
 @app_commands.describe(
     twitch_url="Public Twitch VOD URL",
     style="Override default journal style (optional)",

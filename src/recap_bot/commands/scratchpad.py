@@ -136,6 +136,7 @@ def _register(name: str, description: str) -> None:
     `/scratchpad` and its `/pad` alias."""
 
     @bot.tree.command(name=name, description=description)
+    @app_commands.default_permissions(manage_channels=True)
     @app_commands.describe(
         action="show (default), delete, or edit",
         file="For action=edit: a scratchpad.md file to replace the current scratchpad with",

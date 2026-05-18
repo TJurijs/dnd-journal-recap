@@ -6,6 +6,10 @@ import discord
 from discord import app_commands
 
 from recap_bot.bot import bot
+from recap_bot.commands._helpers import (
+    MANAGE_CHANNELS_REQUIRED_MSG,
+    user_has_manage_channels_anywhere,
+)
 from recap_bot.pipeline import state
 from recap_bot.pipeline.initialize import (
     _initializing_channels,
@@ -94,8 +98,8 @@ def _build_jobs_view() -> tuple[str, discord.ui.View | None]:
     for job in active:
         name = job.title or f"queued recap of {job.source_ref}"
         source = job.channel_label or f"channel {job.channel_id}"
-        session = f"session {job.session}" if job.session else ""
-        meta_bits = [bit for bit in (job.status, session) if bit]
+        vod_ref = f"VOD {job.vod_id}" if job.vod_id else ""
+        meta_bits = [bit for bit in (job.status, vod_ref) if bit]
         meta = f" ({' · '.join(meta_bits)})" if meta_bits else ""
         lines.append(f"🎬 **{name}**{meta}\n   _Source: {source}_")
         if button_count < MAX_BUTTONS:
@@ -115,7 +119,10 @@ def _build_jobs_view() -> tuple[str, discord.ui.View | None]:
 
 @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
 @app_commands.allowed_installs(guilds=True, users=False)
-@bot.tree.command(name="jobs", description="List all active jobs (DM only)")
+@bot.tree.command(name="jobs", description="List all active jobs (DM only, Manage Channels)")
 async def jobs(interaction: discord.Interaction):
+    if not await user_has_manage_channels_anywhere(bot, interaction.user.id):
+        await interaction.response.send_message(MANAGE_CHANNELS_REQUIRED_MSG, ephemeral=True)
+        return
     content, view = _build_jobs_view()
     await interaction.response.send_message(content, view=view, ephemeral=True)
