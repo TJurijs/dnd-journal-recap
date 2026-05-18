@@ -47,13 +47,35 @@ def _check_binary(name: str) -> tuple[bool, str]:
 
 
 def _check_guild() -> tuple[bool, str]:
+    """Report on the configured home guild + enumerate every guild the bot has joined.
+
+    The enumeration matters during multi-server rollouts: after changing
+    DISCORD_GUILD_ID or sending a new invite link, `/check` is how you confirm
+    the bot actually landed in the right place.
+    """
     gid = settings.guild_id_as_int
+    member_guilds = list(bot.guilds)
+    member_lines = (
+        "\n".join(f"   • `{g.name}` ({g.id})" for g in member_guilds)
+        if member_guilds
+        else "   (not in any guilds yet)"
+    )
+
     if not gid:
-        return True, "no DISCORD_GUILD_ID set (global sync)"
-    guild = bot.get_guild(gid)
-    if guild is None:
-        return False, f"guild `{gid}` not visible to this bot"
-    return True, f"`{guild.name}` ({gid})"
+        return True, (
+            f"no `DISCORD_GUILD_ID` set (global command sync). "
+            f"Member of {len(member_guilds)} guild(s):\n{member_lines}"
+        )
+
+    home = bot.get_guild(gid)
+    if home is None:
+        return False, (
+            f"home guild `{gid}` NOT visible — has the bot been invited there?\n"
+            f"   Currently member of {len(member_guilds)} guild(s):\n{member_lines}"
+        )
+    return True, (
+        f"home `{home.name}` ({gid}). Member of {len(member_guilds)} guild(s):\n{member_lines}"
+    )
 
 
 async def _check_llm() -> tuple[bool, str, float]:

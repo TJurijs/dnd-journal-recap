@@ -27,6 +27,14 @@ def _is_dm_only(cmd) -> bool:
 @bot.event
 async def on_ready():
     logger.info("Logged in as %s (ID: %s)", bot.user, bot.user.id)
+    # Log the guild membership so a multi-server operator can confirm at a glance
+    # which servers the bot joined (esp. useful after DISCORD_GUILD_ID swaps or
+    # new invite links).
+    if bot.guilds:
+        guilds_summary = ", ".join(f"{g.name}({g.id})" for g in bot.guilds)
+        logger.info("Member of %d guild(s): %s", len(bot.guilds), guilds_summary)
+    else:
+        logger.info("Not a member of any guilds yet (waiting for invite)")
     # Register the persistent "Edit" dynamic button so old buttons keep working
     # across restarts.
     try:

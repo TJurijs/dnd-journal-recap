@@ -612,7 +612,10 @@ async def _try_notify_failure(bot, job: state.ActiveJob, error: str) -> None:
         if user:
             await user.send(f"❌ Recap failed: {error[:500]}")
     except Exception:
-        logger.exception("Failed to send failure DM")
+        logger.exception(
+            "Failed to send failure DM (channel=%s, guild=%s, user=%s)",
+            job.channel_id, job.guild_id, job.requested_by,
+        )
 
 
 def cancel_job(channel_id: int) -> bool:
