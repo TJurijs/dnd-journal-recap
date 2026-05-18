@@ -263,3 +263,41 @@ def test_cancel_marks_flag():
 
 def test_cancel_nonexistent_returns_false():
     assert state.cancel(9999) is False
+
+
+# ----- /settings helpers -----
+
+def test_settings_mask_short():
+    from recap_bot.commands.settings import _mask
+    assert _mask("") == "(unset)"
+    assert _mask("short") == "*****"
+    assert _mask("abcdefgh") == "********"  # exactly 8 → full mask
+
+
+def test_settings_mask_long():
+    from recap_bot.commands.settings import _mask
+    assert _mask("AIzaSyABC1234567890DEF") == "AIza…0DEF"
+
+
+def test_write_override_roundtrip(isolated_data_dir, monkeypatch):
+    from recap_bot.commands.settings import _write_override
+    from recap_bot import config
+
+    # _write_override uses runtime_config_path() which uses settings.data_dir;
+    # the isolated_data_dir fixture already patches that.
+    _write_override("gemini_api_key", "new-test-key")
+    _write_override("gemini_model", "gemini-3.1-pro-preview")
+
+    path = config.runtime_config_path()
+    assert path.exists()
+
+    import yaml
+    saved = yaml.safe_load(path.read_text())
+    assert saved == {"gemini_api_key": "new-test-key", "gemini_model": "gemini-3.1-pro-preview"}
+
+
+def test_write_override_rejects_non_overridable(isolated_data_dir):
+    from recap_bot.commands.settings import _write_override
+    import pytest
+    with pytest.raises(ValueError):
+        _write_override("discord_bot_token", "secret")  # not in RUNTIME_OVERRIDABLE
