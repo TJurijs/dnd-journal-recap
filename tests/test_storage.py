@@ -218,6 +218,30 @@ async def test_journal_cache_round_trip(isolated_data_dir):
     assert (await channel_files.read_journal_cache(42, 7)).startswith("# Session 7")
 
 
+# ----- recap message id (for /recap_edit in-place attachment swap) -----
+
+def test_recap_message_id_round_trip(isolated_data_dir):
+    recap_dir = channel_files.make_or_reuse_recap_dir(42, "vod1")
+    assert channel_files.read_recap_message_id(recap_dir) is None
+    channel_files.write_recap_message_id(recap_dir, 123456789012345678)
+    assert channel_files.read_recap_message_id(recap_dir) == 123456789012345678
+
+
+def test_recap_message_id_overwrites(isolated_data_dir):
+    """Re-recap (or any rewrite) should replace the stored id, not append."""
+    recap_dir = channel_files.make_or_reuse_recap_dir(42, "vod1")
+    channel_files.write_recap_message_id(recap_dir, 111)
+    channel_files.write_recap_message_id(recap_dir, 222)
+    assert channel_files.read_recap_message_id(recap_dir) == 222
+
+
+def test_recap_message_id_returns_none_for_garbage(isolated_data_dir):
+    """Malformed file shouldn't crash the caller — degrade to 'no id known'."""
+    recap_dir = channel_files.make_or_reuse_recap_dir(42, "vod1")
+    (recap_dir / "discord_msg_id.txt").write_text("not-an-int", encoding="utf-8")
+    assert channel_files.read_recap_message_id(recap_dir) is None
+
+
 # ----- atomic write -----
 
 @pytest.mark.asyncio

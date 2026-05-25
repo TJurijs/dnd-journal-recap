@@ -189,3 +189,70 @@ async def post_journal(
     view = make_edit_view("journal", vod_id)
     msg = await channel.send(content=header, file=file, view=view)
     return msg.id
+
+
+async def edit_journal_message(
+    bot: discord.Client,
+    channel_id: int,
+    message_id: int,
+    new_md_bytes: bytes,
+) -> Optional[int]:
+    """Edit a previously-posted recap message in place: swap the `.md` attachment.
+
+    Preserves the original message content (bold title header), the existing
+    attachment filename, and the persistent "✏️ Edit" view. Returns the
+    message id on success. Returns `None` if the original message was deleted
+    (in which case the caller should not write to disk, so on-disk and
+    in-channel stay in sync).
+    """
+    from io import BytesIO
+
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        channel = await bot.fetch_channel(channel_id)
+
+    try:
+        msg = await channel.fetch_message(message_id)
+    except discord.NotFound:
+        return None
+
+    existing_md = next(
+        (a for a in msg.attachments if a.filename.lower().endswith(".md")),
+        None,
+    )
+    filename = existing_md.filename if existing_md else "recap.md"
+
+    file = discord.File(BytesIO(new_md_bytes), filename=filename)
+    # Omitting content= and view= keeps them unchanged; attachments=[file]
+    # replaces the entire attachment list with just our new file.
+    await msg.edit(attachments=[file])
+    return msg.id
+
+
+async def find_recap_message_id(
+    bot: discord.Client, channel_id: int, vod_id: str, scan_limit: int = 500,
+) -> Optional[int]:
+    """Scan recent channel history for the bot's recap post for this VOD.
+
+    Backfill path for `/recap_edit` when `discord_msg_id.txt` is missing
+    (e.g. recap was posted before this feature shipped). Matches by `.md`
+    attachment filename containing `vod<vod_id>` — that's the pattern
+    `post_journal()` writes.
+    """
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(channel_id)
+        except discord.NotFound:
+            return None
+
+    needle = f"vod{vod_id}"
+    bot_id = bot.user.id if bot.user else None
+    async for msg in channel.history(limit=scan_limit, oldest_first=False):
+        if bot_id is not None and msg.author.id != bot_id:
+            continue
+        for a in msg.attachments:
+            name = a.filename.lower()
+            if name.endswith(".md") and needle in name:
+                return msg.id
+    return None

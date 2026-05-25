@@ -186,6 +186,34 @@ def make_or_reuse_recap_dir(channel_id: int, vod_id: str) -> Path:
     return path
 
 
+# --- Discord message id for the recap's posted journal ---
+#
+# Stored as a tiny text file alongside journal.md so /recap_edit can edit the
+# original Discord post in-place (swap its .md attachment) rather than letting
+# the visible post drift out of sync with the on-disk journal.
+
+_RECAP_MSG_ID_FILE = "discord_msg_id.txt"
+
+
+def read_recap_message_id(recap_dir: Path) -> Optional[int]:
+    """Return the Discord message id of the journal post for this recap.
+
+    None if the file is missing (e.g. recap predates this feature) or malformed.
+    """
+    path = recap_dir / _RECAP_MSG_ID_FILE
+    if not path.exists():
+        return None
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (ValueError, OSError):
+        return None
+
+
+def write_recap_message_id(recap_dir: Path, message_id: int) -> None:
+    """Persist the Discord message id of the journal post for this recap."""
+    write_text_atomic(recap_dir / _RECAP_MSG_ID_FILE, str(message_id))
+
+
 # --- Current roster/scratchpad (latest recap → initialize → legacy channel root) ---
 
 def _roster_source_path(channel_id: int) -> Optional[Path]:

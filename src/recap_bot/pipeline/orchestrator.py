@@ -507,10 +507,20 @@ async def run_job(bot, channel_id: int) -> None:
         _mark_ui(channel_id, "post", "current", tool="discord")
         await _send_status(bot, user_id, channel_id, total_cost=cost_tracker.format_total())
         in_game_date = _extract_ingame_date(journal_md) or datetime.utcnow().strftime("%Y-%m-%d")
-        await discord_journals.post_journal(
+        posted_msg_id = await discord_journals.post_journal(
             bot, channel_id, journal_md,
             vod_id=vod_id, title=job.title, date=in_game_date,
         )
+        # Remember the message id so /recap_edit can edit this post in-place
+        # later (swap the attachment) instead of leaving the visible post
+        # stale relative to journal.md on disk.
+        try:
+            channel_files.write_recap_message_id(recap_dir, posted_msg_id)
+        except Exception:
+            logger.exception(
+                "Failed to persist discord_msg_id for channel %s vod %s",
+                channel_id, vod_id,
+            )
         # The journal we just posted IS a new channel entry; bump the synced count
         # so the next /recap's sanity check stays accurate.
         meta = await channel_files.read_meta(channel_id) or {}
