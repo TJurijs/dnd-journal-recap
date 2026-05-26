@@ -63,7 +63,7 @@ class StepLog:
                 "progress": progress,
                 "note": note,
                 "cost_usd": usage.cost_usd if usage else None,
-                "total_usd": self.cost.total.cost_usd,
+                "total_usd": self.cost.total_cost_usd,
             },
         )
 
@@ -76,6 +76,6 @@ class StepLog:
                 "step": "TOTAL",
                 "status": status,
                 "duration_s": round(elapsed, 1),
-                "total_usd": self.cost.total.cost_usd,
+                "total_usd": self.cost.total_cost_usd,
             },
         )

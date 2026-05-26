@@ -52,7 +52,7 @@ async def transcribe_chunk(chunk_path: Path) -> tuple[str, UsageInfo | None]:
     if not transcript:
         raise RuntimeError("Gemini returned empty transcript for chunk")
 
-    usage = extract_usage(response)
+    usage = extract_usage(response, model)
 
     # Clean up uploaded file
     try:

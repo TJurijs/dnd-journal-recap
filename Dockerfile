@@ -15,8 +15,9 @@ COPY pyproject.toml README.md ./
 COPY src/ ./src/
 RUN pip install --no-cache-dir .
 
-# Runtime config — per-action model assignments. Read at startup from CWD.
-COPY models.yaml ./
+# Runtime config — per-action model assignments + per-model prices. Read at
+# startup from CWD.
+COPY models.yaml prices.yaml ./
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

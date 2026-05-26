@@ -185,3 +185,83 @@ def test_preflight_initialize_needs_only_view_and_history():
     # Missing history is flagged
     perms2 = discord.Permissions(view_channel=True)
     assert _missing_perms(perms2, INITIALIZE_REQUIRED_PERMS) == ["Read Message History"]
+
+
+# ----- model-aware cost tracking -----
+
+def test_price_table_loads_per_model_and_falls_back(tmp_path):
+    from recap_bot.pipeline.cost import PriceTable
+    p = tmp_path / "prices.yaml"
+    p.write_text(
+        "prices:\n"
+        "  pro:\n    input: 2.0\n    output: 10.0\n"
+        "  flash:\n    input: 0.1\n    output: 0.4\n"
+        "default:\n  input: 0.15\n  output: 0.6\n",
+        encoding="utf-8",
+    )
+    tbl = PriceTable(path=p)
+    assert tbl.rates("pro") == (2.0, 10.0)
+    assert tbl.rates("flash") == (0.1, 0.4)
+    assert tbl.rates("some-unknown-model") == (0.15, 0.6)  # fallback
+
+
+def test_price_table_tiered_above_threshold(tmp_path):
+    """Gemini Pro charges more for prompts over 200k tokens — the tier must
+    kick in based on a call's input token count."""
+    from recap_bot.pipeline.cost import PriceTable
+    p = tmp_path / "prices.yaml"
+    p.write_text(
+        "prices:\n"
+        "  pro:\n"
+        "    input: 2.0\n    output: 12.0\n"
+        "    long_threshold: 200000\n    input_long: 4.0\n    output_long: 18.0\n",
+        encoding="utf-8",
+    )
+    tbl = PriceTable(path=p)
+    assert tbl.rates("pro", input_tokens=50_000) == (2.0, 12.0)    # base tier
+    assert tbl.rates("pro", input_tokens=200_000) == (2.0, 12.0)   # at threshold → base
+    assert tbl.rates("pro", input_tokens=250_000) == (4.0, 18.0)   # over → long tier
+
+
+def test_cost_is_model_aware_and_totals_correctly(monkeypatch):
+    from recap_bot.pipeline import cost
+
+    # Install a known table: Pro is 20x Flash on input, 25x on output.
+    tbl = cost.PriceTable.__new__(cost.PriceTable)
+    tbl._prices = {
+        "pro": {"input": 2.0, "output": 10.0},
+        "flash": {"input": 0.1, "output": 0.4},
+    }
+    tbl._default = (0.15, 0.6)
+    tbl._warned = set()
+    monkeypatch.setattr(cost, "price_table", tbl)
+
+    pro = cost.UsageInfo(1_000_000, 1_000_000, "pro")
+    flash = cost.UsageInfo(1_000_000, 1_000_000, "flash")
+    # Per-call cost uses each call's own model rate
+    assert pro.cost_usd == 12.0          # 2.0 + 10.0
+    assert abs(flash.cost_usd - 0.5) < 1e-9  # 0.1 + 0.4
+
+    # The whole point: a mixed-model total sums each at its OWN rate, not a
+    # single flat rate (which was the under-counting bug).
+    t = cost.CostTracker()
+    t.add(pro)
+    t.add(flash)
+    assert abs(t.total_cost_usd - 12.5) < 1e-9
+
+
+def test_extract_usage_tags_model():
+    from recap_bot.pipeline.cost import extract_usage
+
+    class _Meta:
+        prompt_token_count = 100
+        candidates_token_count = 50
+
+    class _Resp:
+        usage_metadata = _Meta()
+
+    u = extract_usage(_Resp(), "gemini-3.1-pro-preview")
+    assert u is not None
+    assert u.input_tokens == 100
+    assert u.output_tokens == 50
+    assert u.model == "gemini-3.1-pro-preview"

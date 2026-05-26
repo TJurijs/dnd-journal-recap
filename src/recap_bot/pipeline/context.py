@@ -99,7 +99,7 @@ Journals:
         contents=prompt,
     )
     text = (response.text or "").strip()
-    usage = extract_usage(response)
+    usage = extract_usage(response, model)
 
     # Keep only lines that match the strict format; LLMs sometimes wrap with prose.
     lines = [ln for ln in text.splitlines() if _NAME_RE.match(ln.strip())]
@@ -153,7 +153,7 @@ Journal records:
         contents=prompt,
     )
     text = (response.text or "").strip()
-    usage = extract_usage(response)
+    usage = extract_usage(response, model)
 
     if progress_cb:
         await progress_cb(total, total, usage)
@@ -193,7 +193,7 @@ Return ONLY the updated scratchpad with the new entry appended."""
     )
 
     text = response.text or ""
-    usage = extract_usage(response)
+    usage = extract_usage(response, model)
     return (text.strip() or existing_scratchpad), usage
 
 
@@ -253,5 +253,5 @@ Return ONLY the updated roster inside the tags."""
     elif text.strip():
         roster = text.strip()
 
-    usage = extract_usage(response)
+    usage = extract_usage(response, model)
     return roster, usage

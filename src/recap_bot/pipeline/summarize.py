@@ -48,5 +48,5 @@ async def summarize_session(job, transcript: str, style: str | None = None) -> t
     if not journal:
         raise RuntimeError("Gemini returned empty journal")
 
-    usage = extract_usage(response)
+    usage = extract_usage(response, model)
     return journal, usage
