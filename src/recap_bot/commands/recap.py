@@ -1,5 +1,3 @@
-import re
-
 import discord
 from discord import app_commands
 
@@ -7,20 +5,19 @@ from recap_bot.bot import bot
 from recap_bot.commands._helpers import format_channel_label
 from recap_bot.config import settings
 from recap_bot.pipeline import state
+from recap_bot.pipeline.download import detect_source
 from recap_bot.pipeline.initialize import is_initializing
 from recap_bot.queue import JobQueue
 from recap_bot.storage import discord_journals, files as channel_files
 
-_TWITCH_RE = re.compile(r"https?://(?:www\.)?twitch\.tv/(?:[^/]+/)?videos/(\d+)")
-
 
 @bot.tree.command(
     name="recap",
-    description="Generate a session recap from a Twitch VOD",
+    description="Generate a session recap from a Twitch or YouTube VOD",
 )
 @app_commands.default_permissions(manage_channels=True)
 @app_commands.describe(
-    twitch_url="Public Twitch VOD URL",
+    url="Public Twitch VOD URL or YouTube video URL (max 6h duration)",
     style="Override default journal style (optional)",
     force="Delete cached audio/chunks for this VOD and re-download",
 )
@@ -29,15 +26,21 @@ _TWITCH_RE = re.compile(r"https?://(?:www\.)?twitch\.tv/(?:[^/]+/)?videos/(\d+)"
 )
 async def recap(
     interaction: discord.Interaction,
-    twitch_url: str,
+    url: str,
     style: app_commands.Choice[str] = None,
     force: bool = False,
 ):
     await interaction.response.defer(ephemeral=True)
 
-    if not _TWITCH_RE.match(twitch_url):
-        await interaction.followup.send("Invalid Twitch VOD URL.", ephemeral=True)
+    detected = detect_source(url)
+    if detected is None:
+        await interaction.followup.send(
+            "Invalid VOD URL — must be a Twitch VOD (`twitch.tv/.../videos/<id>`) "
+            "or YouTube link (`youtube.com/watch?v=<id>` or `youtu.be/<id>`).",
+            ephemeral=True,
+        )
         return
+    source_type, _vod_id = detected
 
     channel_id = interaction.channel_id
     guild_id = interaction.guild_id
@@ -90,8 +93,8 @@ async def recap(
         channel_id=channel_id,
         guild_id=guild_id or 0,
         requested_by=interaction.user.id,
-        source_type="twitch",
-        source_ref=twitch_url,
+        source_type=source_type,
+        source_ref=url,
         style=style_value,
         channel_label=format_channel_label(interaction.channel),
         force=force,

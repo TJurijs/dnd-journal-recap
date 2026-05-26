@@ -27,7 +27,7 @@ class ActiveJob:
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     cancelled: bool = False
-    vod_id: str = ""                   # Twitch VOD id, parsed from source_ref
+    vod_id: str = ""                   # VOD id (Twitch numeric or YouTube alphanum), parsed from source_ref
     title: str = ""                    # VOD title, for status display
     channel_label: str = ""            # "Category / channel-name" — captured at invocation
     force: bool = False                # wipe cached audio/chunks before running

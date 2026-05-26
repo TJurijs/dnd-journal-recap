@@ -9,14 +9,44 @@ from recap_bot.config import settings
 
 logger = logging.getLogger(__name__)
 
-_TWITCH_RE = re.compile(r"https?://(?:www\.)?twitch\.tv/(?:[^/]+/)?videos/(\d+)")
+_TWITCH_RE = re.compile(r"https?://(?:www\.)?twitch\.tv/(?:[^/]+/)?videos/(?P<id>\d+)")
+
+# YouTube IDs are exactly 11 chars from [A-Za-z0-9_-]. The URL forms we accept
+# are watch?v=, youtu.be/, live/, embed/, v/, shorts/ — covering the common
+# desktop/mobile/share variants. (`[^#]*?&` lets us match `?foo=bar&v=ID`.)
+_YOUTUBE_RE = re.compile(
+    r"https?://"
+    r"(?:(?:www|m)\.)?"
+    r"(?:youtube\.com/(?:watch\?(?:[^#]*?&)?v=|live/|embed/|v/|shorts/)|youtu\.be/)"
+    r"(?P<id>[\w-]{11})"
+)
+
+
+def detect_source(url: str) -> tuple[str, str] | None:
+    """Match `url` against supported platforms.
+
+    Returns `(source_type, vod_id)` where `source_type` is "twitch" or "youtube",
+    or `None` if the URL isn't a supported VOD URL. Used by `/recap` for input
+    validation AND by the download pipeline to derive the vod id consistently.
+    """
+    m = _TWITCH_RE.match(url)
+    if m:
+        return "twitch", m.group("id")
+    m = _YOUTUBE_RE.match(url)
+    if m:
+        return "youtube", m.group("id")
+    return None
 
 
 def get_vod_id(url: str) -> str:
-    match = _TWITCH_RE.match(url)
-    if not match:
-        raise ValueError("Invalid Twitch VOD URL")
-    return match.group(1)
+    """Extract the platform-specific VOD id from a supported URL.
+
+    Raises ValueError for unsupported URLs.
+    """
+    detected = detect_source(url)
+    if detected is None:
+        raise ValueError(f"Unsupported VOD URL: {url!r} (must be Twitch or YouTube)")
+    return detected[1]
 
 
 _OG_TITLE_RE = re.compile(
@@ -66,11 +96,12 @@ async def get_vod_info(url: str) -> dict:
 
     Two-tier:
       1. yt-dlp metadata extraction (preferred — also gives duration + uploader)
-      2. HTML scrape of `og:title` / `<title>` (fallback when yt-dlp's API path
-         breaks; no duration/uploader available this way)
+      2. HTML scrape of `og:title` / `<title>` (Twitch-only fallback for when
+         yt-dlp's API path breaks; YouTube's yt-dlp extractor is the most
+         maintained one upstream so we don't need a parallel HTML scrape)
     """
-    if not _TWITCH_RE.match(url):
-        raise ValueError("Invalid Twitch VOD URL")
+    if detect_source(url) is None:
+        raise ValueError(f"Unsupported VOD URL: {url!r} (must be Twitch or YouTube)")
 
     url = url.split("?t=")[0].split("&t=")[0]
 
@@ -91,8 +122,10 @@ async def get_vod_info(url: str) -> dict:
         logger.warning("yt-dlp probe failed for %s — trying HTML fallback", url, exc_info=True)
         result = {"title": "", "duration": 0, "uploader": "Unknown"}
 
-    if not result["title"]:
-        # Either yt-dlp failed outright or it returned an empty title.
+    if not result["title"] and _TWITCH_RE.match(url):
+        # Twitch-only fallback: yt-dlp failed and we can usually still get the
+        # title via the static HTML. YouTube doesn't need this — its yt-dlp
+        # extractor is reliable enough that a fallback would just add latency.
         scraped = await _fetch_title_from_html(url)
         if scraped:
             logger.info("Got title from HTML scrape: %r", scraped)
@@ -103,8 +136,8 @@ async def get_vod_info(url: str) -> dict:
 
 
 async def download_vod(url: str, dest_dir: Path, job_id: int, progress_queue: asyncio.Queue | None = None) -> Path:
-    if not _TWITCH_RE.match(url):
-        raise ValueError("Invalid Twitch VOD URL")
+    if detect_source(url) is None:
+        raise ValueError(f"Unsupported VOD URL: {url!r} (must be Twitch or YouTube)")
 
     # Strip timestamps
     url = url.split("?t=")[0].split("&t=")[0]
