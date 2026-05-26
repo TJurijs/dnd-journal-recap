@@ -130,6 +130,69 @@ async def test_clear_context_removes_initialize_files(isolated_data_dir):
     assert not await channel_files.has_context(42)
 
 
+# ----- /roster action:delete / /scratchpad action:delete (clear_*) -----
+
+@pytest.mark.asyncio
+async def test_clear_roster_deletes_initialize_when_no_recaps(isolated_data_dir):
+    await channel_files.write_initialize_roster(42, "init roster")
+    deleted = await channel_files.clear_roster(42)
+    assert deleted is not None
+    assert deleted.name == "roster.md"
+    assert "initialize" in deleted.parts
+    assert (await channel_files.read_roster(42)) is None
+
+
+@pytest.mark.asyncio
+async def test_clear_roster_deletes_recap_snapshot_when_present(isolated_data_dir):
+    """Regression: previously /roster delete only touched initialize/, so a
+    user looking at a recap-snapshot roster saw 'No roster to delete' even
+    though /roster show clearly returned content. Now delete removes what
+    /roster show actually displays."""
+    recap_dir = channel_files.make_or_reuse_recap_dir(42, "vodA")
+    (recap_dir / "roster.md").write_text("from recap snapshot", encoding="utf-8")
+    # initialize/ may or may not exist; the recap snapshot wins via priority
+    deleted = await channel_files.clear_roster(42)
+    assert deleted is not None
+    assert "vodA" in str(deleted)
+    assert (await channel_files.read_roster(42)) is None
+
+
+@pytest.mark.asyncio
+async def test_clear_roster_peels_through_snapshots_iteratively(isolated_data_dir):
+    """Multiple recap snapshots: each delete removes the latest, the next
+    show falls through to the previous one. This is the intentional
+    iterative-cleanup workflow."""
+    for i, content in enumerate(["first", "second", "third"], 1):
+        recap_dir = channel_files.make_or_reuse_recap_dir(42, f"vod{i}")
+        (recap_dir / "roster.md").write_text(content, encoding="utf-8")
+    assert (await channel_files.read_roster(42)) == "third"
+    await channel_files.clear_roster(42)
+    assert (await channel_files.read_roster(42)) == "second"
+    await channel_files.clear_roster(42)
+    assert (await channel_files.read_roster(42)) == "first"
+    await channel_files.clear_roster(42)
+    assert (await channel_files.read_roster(42)) is None
+    # And once everything's gone, returns None instead of looping forever.
+    assert (await channel_files.clear_roster(42)) is None
+
+
+@pytest.mark.asyncio
+async def test_clear_roster_returns_none_when_nothing_anywhere(isolated_data_dir):
+    deleted = await channel_files.clear_roster(42)
+    assert deleted is None
+
+
+@pytest.mark.asyncio
+async def test_clear_scratchpad_deletes_displayed_source(isolated_data_dir):
+    """Mirror of clear_roster — same semantic for the scratchpad."""
+    recap_dir = channel_files.make_or_reuse_recap_dir(42, "vodA")
+    (recap_dir / "scratchpad.md").write_text("from recap", encoding="utf-8")
+    deleted = await channel_files.clear_scratchpad(42)
+    assert deleted is not None
+    assert "vodA" in str(deleted)
+    assert (await channel_files.read_scratchpad(42)) is None
+
+
 # ----- recap dirs + cache -----
 
 def test_make_or_reuse_recap_dir_new(isolated_data_dir):

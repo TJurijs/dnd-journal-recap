@@ -86,14 +86,24 @@ async def _do_delete(interaction: discord.Interaction):
         )
         return
 
-    existed = await channel_files.clear_roster(interaction.channel_id)
-    if existed:
+    deleted = await channel_files.clear_roster(interaction.channel_id)
+    if deleted is not None:
+        try:
+            rel = deleted.relative_to(deleted.parents[3])
+        except (ValueError, IndexError):
+            rel = deleted
         await interaction.response.send_message(
-            "🗑️ Roster deleted from `initialize/`. Recap snapshots still hold their own copies — edit them individually if needed.",
+            f"🗑️ Deleted `{rel}`. The next `/roster` falls back to the previous "
+            f"snapshot (if any), then `/initialize` content, then empty. Run "
+            f"`/roster action:delete` again to keep peeling back.",
             ephemeral=True,
         )
     else:
-        await interaction.response.send_message("No roster to delete.", ephemeral=True)
+        await interaction.response.send_message(
+            "No roster to delete — this channel has no roster anywhere "
+            "(no initialize/, no recap snapshots, no legacy file).",
+            ephemeral=True,
+        )
 
 
 async def _do_edit(

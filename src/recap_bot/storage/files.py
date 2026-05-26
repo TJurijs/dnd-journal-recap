@@ -220,13 +220,17 @@ def _roster_source_path(channel_id: int) -> Optional[Path]:
     """Locate the most authoritative roster.md for this channel.
 
     Order:
-      1. Latest recap's roster.md
+      1. Walk recap dirs newest→oldest, return the first one with roster.md.
+         (The simple "latest only" approach broke `/roster action:delete` —
+         deleting the latest recap's roster.md would skip straight to
+         initialize/ instead of falling through to the previous snapshot.)
       2. initialize/roster.md
       3. Legacy channel-root roster.md (pre-restructure layout)
     """
-    latest = latest_recap_dir(channel_id)
-    if latest and (latest / "roster.md").exists():
-        return latest / "roster.md"
+    for recap_dir in reversed(list_recap_dirs(channel_id)):
+        p = recap_dir / "roster.md"
+        if p.exists():
+            return p
     init_path = initialize_dir(channel_id) / "roster.md"
     if init_path.exists():
         return init_path
@@ -237,9 +241,11 @@ def _roster_source_path(channel_id: int) -> Optional[Path]:
 
 
 def _scratchpad_source_path(channel_id: int) -> Optional[Path]:
-    latest = latest_recap_dir(channel_id)
-    if latest and (latest / "scratchpad.md").exists():
-        return latest / "scratchpad.md"
+    """Symmetric with `_roster_source_path` — walks recap dirs newest→oldest."""
+    for recap_dir in reversed(list_recap_dirs(channel_id)):
+        p = recap_dir / "scratchpad.md"
+        if p.exists():
+            return p
     init_path = initialize_dir(channel_id) / "scratchpad.md"
     if init_path.exists():
         return init_path
@@ -332,31 +338,43 @@ async def clear_context(channel_id: int) -> None:
                 path.unlink()
 
 
-async def clear_roster(channel_id: int) -> bool:
-    """Delete roster.md from initialize/ (and legacy location). Returns True if anything was removed."""
+async def clear_roster(channel_id: int) -> Optional[Path]:
+    """Delete the roster.md that `/roster` currently displays.
+
+    The displayed roster comes from `_roster_source_path`'s priority order
+    (latest recap → initialize/ → legacy), so this deletes whichever of those
+    is actually serving the user. Subsequent `/roster` calls fall through to
+    the next file in the priority chain (next-newest recap snapshot →
+    initialize/ → legacy → empty).
+
+    Returns the deleted path, or None if there was nothing to delete.
+
+    Note: deleting a recap-snapshot roster also affects the chain seeded into
+    the *next* `/recap` on a new VOD (it'll start from an empty roster if all
+    snapshots have been wiped). That's the intended behavior for an explicit
+    delete — surgical, predictable, and matches what the user sees.
+    """
     async with channel_lock(channel_id):
-        removed = False
-        for path in (
-            initialize_dir(channel_id) / "roster.md",
-            _channel_root(channel_id) / "roster.md",
-        ):
-            if path.exists():
-                path.unlink()
-                removed = True
-        return removed
+        path = _roster_source_path(channel_id)
+        if path is None or not path.exists():
+            return None
+        path.unlink()
+        return path
 
 
-async def clear_scratchpad(channel_id: int) -> bool:
+async def clear_scratchpad(channel_id: int) -> Optional[Path]:
+    """Delete the scratchpad.md that `/scratchpad` (or `/pad`) currently displays.
+
+    Symmetric with `clear_roster`: uses `_scratchpad_source_path`'s priority
+    order so we always delete what the user actually sees. Returns the deleted
+    path, or None if nothing was displayed.
+    """
     async with channel_lock(channel_id):
-        removed = False
-        for path in (
-            initialize_dir(channel_id) / "scratchpad.md",
-            _channel_root(channel_id) / "scratchpad.md",
-        ):
-            if path.exists():
-                path.unlink()
-                removed = True
-        return removed
+        path = _scratchpad_source_path(channel_id)
+        if path is None or not path.exists():
+            return None
+        path.unlink()
+        return path
 
 
 # --- Journal cache (mirror of Discord-as-truth) ---
