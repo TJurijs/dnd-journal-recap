@@ -59,33 +59,61 @@ async def recap(
         )
         return
 
-    if not await channel_files.has_context(channel_id):
-        await interaction.followup.send(
-            "This channel hasn't been initialized yet. Run `/initialize` first to build the roster and scratchpad.",
-            ephemeral=True,
-        )
-        return
-
-    # Sanity check: if journals have been added to the channel since the last
-    # /initialize (or /recap), the on-disk roster/scratchpad is out of sync and
-    # a new init is needed before this recap can correctly incorporate them.
-    meta = await channel_files.read_meta(channel_id) or {}
-    journals_synced = int(meta.get("journals_synced", 0))
+    # Snapshot channel state ONCE — we need the journal count for two checks
+    # below (empty-channel fast-path AND journals-synced drift check).
     try:
         current_entries = await discord_journals.list_for_channel(bot, channel_id)
         current_count = len(current_entries)
+        scan_failed = False
     except Exception:
-        current_count = journals_synced  # fail-open if Discord scan fails
+        current_count = 0
+        scan_failed = True
 
-    if current_count > journals_synced:
-        new_count = current_count - journals_synced
-        await interaction.followup.send(
-            f"⚠️ This channel has **{current_count}** journal entries but only **{journals_synced}** "
-            f"have been incorporated into the roster/scratchpad. {new_count} new entr(y/ies) need to be "
-            f"synced first — run `/initialize` to rebuild context, then re-run `/recap`.",
-            ephemeral=True,
-        )
-        return
+    meta = await channel_files.read_meta(channel_id) or {}
+    has_ctx = await channel_files.has_context(channel_id)
+
+    if not has_ctx:
+        # No prior /initialize, no recap snapshots on disk.
+        if scan_failed:
+            await interaction.followup.send(
+                "Couldn't read channel history to determine state. Run `/initialize` "
+                "first to seed the roster and scratchpad.",
+                ephemeral=True,
+            )
+            return
+        if current_count > 0:
+            # Channel has organic journals but the bot has no state for them.
+            # Forcing /initialize first ensures the new recap chains correctly
+            # off the existing campaign content instead of overwriting it.
+            await interaction.followup.send(
+                f"This channel has **{current_count}** journal entr(y/ies) but no "
+                f"`/initialize` has been run. Run `/initialize` first to seed the "
+                f"roster and scratchpad from those entries — otherwise this recap "
+                f"would lose continuity with them.",
+                ephemeral=True,
+            )
+            return
+        # Empty channel + no prior state: skip the /initialize requirement.
+        # The orchestrator's read_context_for_recap returns ("", "") for this
+        # case and the LLM's roster/scratchpad steps will populate from the
+        # first recap's content. Seed meta.yaml with guild_id so subsequent
+        # reads have it (normally /initialize does this).
+        await channel_files.write_meta(channel_id, guild_id=guild_id or 0)
+    else:
+        # Prior state exists. Enforce that journals_synced is current so the
+        # new recap incorporates everything added to the channel since the
+        # last /initialize or /recap.
+        journals_synced = int(meta.get("journals_synced", 0))
+        if not scan_failed and current_count > journals_synced:
+            new_count = current_count - journals_synced
+            await interaction.followup.send(
+                f"⚠️ This channel has **{current_count}** journal entries but only "
+                f"**{journals_synced}** have been incorporated into the roster/scratchpad. "
+                f"{new_count} new entr(y/ies) need to be synced first — run "
+                f"`/initialize` to rebuild context, then re-run `/recap`.",
+                ephemeral=True,
+            )
+            return
 
     style_value = style.value if style else (meta.get("style") or settings.default_style)
 
