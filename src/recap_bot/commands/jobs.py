@@ -1,4 +1,8 @@
-"""DM-only /jobs command: list all active recap + init jobs with cancel buttons."""
+"""DM-only /jobs command: list all active recap + init jobs with cancel buttons.
+
+Jobs are keyed by CATEGORY (storage scope). A job's `channel_id` is the channel
+its recap will post to; `category_id` is what cancellation/state use.
+"""
 
 import logging
 
@@ -21,21 +25,21 @@ logger = logging.getLogger(__name__)
 
 
 class _CancelRecapButton(discord.ui.Button):
-    """Cancel an active /recap job for a given channel."""
+    """Cancel an active /recap job for a given category."""
 
-    def __init__(self, channel_id: int, label: str):
+    def __init__(self, category_id: int, label: str):
         super().__init__(
             style=discord.ButtonStyle.danger,
             label=f"Cancel · {label}",
-            custom_id=f"cancel_recap_{channel_id}",
+            custom_id=f"cancel_recap_{category_id}",
         )
-        self.channel_id = channel_id
+        self.category_id = category_id
 
     async def callback(self, interaction: discord.Interaction):
-        job = state.get(self.channel_id)
+        job = state.get(self.category_id)
         if job is None:
             await interaction.response.send_message(
-                f"⏭️ Recap on channel `{self.channel_id}` already completed.",
+                f"⏭️ Recap for category `{self.category_id}` already completed.",
                 ephemeral=True,
             )
             return
@@ -43,39 +47,39 @@ class _CancelRecapButton(discord.ui.Button):
         # Just set the flag — the orchestrator's _check_cancelled reads
         # job.cancelled via state.get(). If we released here, the flag would
         # be invisible to the orchestrator and the job would run to completion.
-        cancel_job(self.channel_id)
+        cancel_job(self.category_id)
         await interaction.response.send_message(
-            f"⏹️ Cancelling recap: **{name}** ({job.channel_label or self.channel_id}).\n"
+            f"⏹️ Cancelling recap: **{name}** ({job.channel_label or self.category_id}).\n"
             f"It will stop at the next safe checkpoint.",
             ephemeral=True,
         )
 
 
 class _CancelInitButton(discord.ui.Button):
-    """Cancel a running /initialize on a given channel.
+    """Cancel a running /initialize for a given category.
 
     Note: the in-flight LLM call cannot be aborted mid-request — our task is
     cancelled but the API call still runs server-side (and is billed).
     """
 
-    def __init__(self, channel_id: int, label: str):
+    def __init__(self, category_id: int, label: str):
         super().__init__(
             style=discord.ButtonStyle.danger,
             label=f"Cancel init · {label}",
-            custom_id=f"cancel_init_{channel_id}",
+            custom_id=f"cancel_init_{category_id}",
         )
-        self.channel_id = channel_id
+        self.category_id = category_id
 
     async def callback(self, interaction: discord.Interaction):
-        ok = cancel_initialization(self.channel_id)
+        ok = cancel_initialization(self.category_id)
         if not ok:
             await interaction.response.send_message(
-                f"⏭️ Initialization on channel `{self.channel_id}` already finished.",
+                f"⏭️ Initialization for category `{self.category_id}` already finished.",
                 ephemeral=True,
             )
             return
         await interaction.response.send_message(
-            f"⏹️ Cancelling initialization on channel `{self.channel_id}`. "
+            f"⏹️ Cancelling initialization for category `{self.category_id}`. "
             f"The bot will stop at the next checkpoint. Any in-flight LLM call may still complete "
             f"server-side and be billed.",
             ephemeral=True,
@@ -101,17 +105,17 @@ def _build_jobs_view() -> tuple[str, discord.ui.View | None]:
         vod_ref = f"VOD {job.vod_id}" if job.vod_id else ""
         meta_bits = [bit for bit in (job.status, vod_ref) if bit]
         meta = f" ({' · '.join(meta_bits)})" if meta_bits else ""
-        lines.append(f"🎬 **{name}**{meta}\n   _Source: {source}_")
+        lines.append(f"🎬 **{name}**{meta}\n   _Posting to: {source}_")
         if button_count < MAX_BUTTONS:
-            view.add_item(_CancelRecapButton(job.channel_id, name[:30]))
+            view.add_item(_CancelRecapButton(job.category_id, name[:30]))
             button_count += 1
 
-    for channel_id in initializing:
-        if state.get(channel_id) is not None:
-            continue  # already rendered above (init+recap on same channel shouldn't happen, but defensive)
-        lines.append(f"🛠️ **Initialization** on channel `{channel_id}`")
+    for category_id in initializing:
+        if state.get(category_id) is not None:
+            continue  # already rendered above (init+recap on same category shouldn't happen, but defensive)
+        lines.append(f"🛠️ **Initialization** for category `{category_id}`")
         if button_count < MAX_BUTTONS:
-            view.add_item(_CancelInitButton(channel_id, str(channel_id)[:20]))
+            view.add_item(_CancelInitButton(category_id, str(category_id)[:20]))
             button_count += 1
 
     return "**Active jobs:**\n\n" + "\n\n".join(lines), view

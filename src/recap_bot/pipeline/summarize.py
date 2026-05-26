@@ -20,14 +20,13 @@ def _get_client() -> genai.Client:
     return _client
 
 
-async def summarize_session(job, transcript: str, style: str | None = None) -> tuple[str, UsageInfo | None]:
+async def summarize_session(category_id: int, transcript: str, style: str | None = None) -> tuple[str, UsageInfo | None]:
     model = model_config.get("summarize")
-    channel_id = job["channel_id"]
-    meta = await channel_files.read_meta(channel_id) or {"channel_id": channel_id}
+    meta = await channel_files.read_meta(category_id) or {"category_id": category_id}
     effective_style = style or meta.get("style") or settings.default_style
 
-    roster_text = await channel_files.read_roster(channel_id)
-    scratchpad_text = await channel_files.read_scratchpad(channel_id)
+    roster_text = await channel_files.read_roster(category_id)
+    scratchpad_text = await channel_files.read_scratchpad(category_id)
 
     prompt = build_summarize_prompt(
         campaign=meta,

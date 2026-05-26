@@ -26,31 +26,33 @@ logger = logging.getLogger(__name__)
 
 # Channels currently being initialized. Used as a soft lock so /recap and a
 # second /initialize fail fast instead of racing.
+# CATEGORY ids currently being initialized (the name is kept for import
+# compatibility, but these are category ids now — storage is category-scoped).
 _initializing_channels: set[int] = set()
-# Channels where the user clicked Cancel mid-initialization. Read at
+# Category ids where the user clicked Cancel mid-initialization. Read at
 # checkpoints; once seen the entry is consumed.
 _init_cancelled: set[int] = set()
 
 
-def is_initializing(channel_id: int) -> bool:
-    return channel_id in _initializing_channels
+def is_initializing(category_id: int) -> bool:
+    return category_id in _initializing_channels
 
 
-def cancel_initialization(channel_id: int) -> bool:
+def cancel_initialization(category_id: int) -> bool:
     """Request cancellation of a running /initialize. Returns True if there
     was something to cancel. Caveat: an in-flight LLM call cannot be aborted
     mid-request — the bot's task is cancelled but the API call still completes
     server-side (you'll still be billed)."""
-    if channel_id in _initializing_channels:
-        _init_cancelled.add(channel_id)
+    if category_id in _initializing_channels:
+        _init_cancelled.add(category_id)
         return True
     return False
 
 
-def _check_init_cancelled(channel_id: int) -> None:
-    if channel_id in _init_cancelled:
-        _init_cancelled.discard(channel_id)
-        raise asyncio.CancelledError(f"/initialize on channel {channel_id} cancelled by user")
+def _check_init_cancelled(category_id: int) -> None:
+    if category_id in _init_cancelled:
+        _init_cancelled.discard(category_id)
+        raise asyncio.CancelledError(f"/initialize on channel {category_id} cancelled by user")
 
 
 class InitResult:
@@ -64,34 +66,39 @@ class InitResult:
 async def run_initialization(
     bot: discord.Client,
     progress_msg: discord.WebhookMessage | discord.Message,
-    channel_id: int,
+    category_id: int,
+    journal_channel_id: int,
     guild_id: int,
     *,
     channel_label: str = "",
 ) -> InitResult:
-    """Build roster + scratchpad from existing Discord journals. Edits `progress_msg` in place.
+    """Build the CATEGORY's roster + scratchpad from the journal channel's
+    history. Reads journals from `journal_channel_id` (the channel /initialize
+    was run in) but stores everything under `category_id`. Edits `progress_msg`
+    in place.
 
-    Caller is responsible for the `_initializing_channels` lock — acquire before
-    calling, release in finally.
+    Caller is responsible for the `_initializing_channels` lock (keyed by
+    category_id) — acquire before calling, release in finally.
     """
     cost = CostTracker()
-    step_log = StepLog(context=f"init#{channel_id}", cost_tracker=cost)
+    step_log = StepLog(context=f"init#cat{category_id}", cost_tracker=cost)
     header = f"**{channel_label}**\n\n" if channel_label else ""
 
     # Ensure meta.yaml exists with guild_id (so /recap can find it)
-    await channel_files.write_meta(channel_id, guild_id=guild_id)
+    await channel_files.write_meta(category_id, guild_id=guild_id)
 
-    _check_init_cancelled(channel_id)
+    _check_init_cancelled(category_id)
 
-    # Discover journals in Discord channel history
-    entries = await discord_journals.list_for_channel(bot, channel_id)
+    # Discover journals in the journal CHANNEL's history (storage is keyed by
+    # category, but the journals themselves live in the journal channel).
+    entries = await discord_journals.list_for_channel(bot, journal_channel_id)
     step_log.step("scan", tool="discord", progress="done", note=f"{len(entries)} journal(s)")
-    _check_init_cancelled(channel_id)
+    _check_init_cancelled(category_id)
 
     if not entries:
-        await channel_files.write_roster(channel_id, "")
-        await channel_files.write_scratchpad(channel_id, "")
-        await channel_files.write_meta(channel_id, journals_synced=0)
+        await channel_files.write_roster(category_id, "")
+        await channel_files.write_scratchpad(category_id, "")
+        await channel_files.write_meta(category_id, journals_synced=0)
         step_log.total(status="empty")
         try:
             await progress_msg.edit(content=f"{header}📭 No prior journals found.\n\n✅ Job completed")
@@ -103,18 +110,18 @@ async def run_initialization(
     await progress_msg.edit(content=f"{header}📥 Fetching {len(entries)} journal(s) from channel history...")
     journals_md: list[str] = []
     for i, entry in enumerate(entries, 1):
-        _check_init_cancelled(channel_id)
+        _check_init_cancelled(category_id)
         try:
-            text = await discord_journals.fetch_content(channel_id, entry)
+            text = await discord_journals.fetch_content(category_id, entry)
         except Exception:
-            logger.exception("Failed to fetch journal #%s in channel %s", entry.session, channel_id)
+            logger.exception("Failed to fetch journal #%s in channel %s", entry.session, category_id)
             continue
         if text:
             journals_md.append(text)
         if i % 5 == 0 or i == len(entries):
             await progress_msg.edit(content=f"{header}📥 Fetched {i}/{len(entries)} journal(s)...")
     step_log.step("fetch", tool="discord", progress="done", note=f"{len(journals_md)} body/ies loaded")
-    _check_init_cancelled(channel_id)
+    _check_init_cancelled(category_id)
 
     # Per-step state for the live DM. With single-call builds there's no
     # granular per-batch progress, so we show elapsed time instead and flip the
@@ -167,7 +174,7 @@ async def run_initialization(
         try:
             while True:
                 await asyncio.sleep(2)
-                if channel_id in _init_cancelled:
+                if category_id in _init_cancelled:
                     for t in build_tasks:
                         if not t.done():
                             t.cancel()
@@ -230,7 +237,7 @@ async def run_initialization(
             if not t.done():
                 t.cancel()
         await asyncio.gather(roster_task, scratchpad_task, return_exceptions=True)
-        _init_cancelled.discard(channel_id)
+        _init_cancelled.discard(category_id)
         progress_state["roster"]["status"] = "failed"
         progress_state["scratchpad"]["status"] = "failed"
         heartbeat.cancel()
@@ -239,9 +246,9 @@ async def run_initialization(
     finally:
         heartbeat.cancel()
 
-    await channel_files.write_roster(channel_id, roster_text)
-    await channel_files.write_scratchpad(channel_id, scratchpad_text)
-    await channel_files.write_meta(channel_id, journals_synced=len(entries))
+    await channel_files.write_roster(category_id, roster_text)
+    await channel_files.write_scratchpad(category_id, scratchpad_text)
+    await channel_files.write_meta(category_id, journals_synced=len(entries))
     step_log.total(status="done")
 
     await _render(footer="✅ Job completed")

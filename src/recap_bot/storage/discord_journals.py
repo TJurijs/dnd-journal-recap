@@ -126,12 +126,14 @@ async def list_for_channel(bot: discord.Client, channel_id: int, limit: int = 10
     return entries
 
 
-async def fetch_content(channel_id: int, entry: JournalEntry) -> str:
-    """Return the journal body for this entry, caching on disk.
+async def fetch_content(category_id: int, entry: JournalEntry) -> str:
+    """Return the journal body for this entry, caching on disk under the
+    CATEGORY (journals are scanned from the journal channel but cached per
+    category, the storage scope).
 
     Preference: existing disk cache → `.md` attachment → message body.
     """
-    cached = await channel_files.read_journal_cache(channel_id, entry.session)
+    cached = await channel_files.read_journal_cache(category_id, entry.session)
     if cached is not None:
         return cached
 
@@ -142,7 +144,7 @@ async def fetch_content(channel_id: int, entry: JournalEntry) -> str:
         text = entry.body
 
     if text:
-        await channel_files.write_journal_cache(channel_id, entry.session, text)
+        await channel_files.write_journal_cache(category_id, entry.session, text)
     entry.content = text
     return text
 

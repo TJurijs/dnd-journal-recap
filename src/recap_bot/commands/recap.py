@@ -3,16 +3,18 @@ from discord import app_commands
 
 from recap_bot.bot import bot
 from recap_bot.commands._helpers import (
+    NOT_IN_CATEGORY_MSG,
     RECAP_REQUIRED_PERMS,
     bot_missing_channel_perms,
     format_channel_label,
+    resolve_category,
 )
 from recap_bot.config import settings
 from recap_bot.pipeline import state
 from recap_bot.pipeline.download import detect_source
 from recap_bot.pipeline.initialize import is_initializing
 from recap_bot.queue import JobQueue
-from recap_bot.storage import discord_journals, files as channel_files
+from recap_bot.storage import files as channel_files
 
 
 @bot.tree.command(
@@ -46,10 +48,16 @@ async def recap(
         return
     source_type, _vod_id = detected
 
-    # Permission preflight — the recap pipeline is expensive (download +
-    # transcribe + summarize, all billable) and only posts the result at the
-    # very end. Bail BEFORE any of that if the bot can't post here, so a
-    # locked-down channel never costs you a doomed API run.
+    # Data is scoped to the channel's CATEGORY. No category → no scoping → refuse.
+    cat = resolve_category(interaction)
+    if cat is None:
+        await interaction.followup.send(NOT_IN_CATEGORY_MSG, ephemeral=True)
+        return
+    category_id, category_name = cat
+
+    # Permission preflight on the POST channel (where this recap will be posted).
+    # The pipeline is expensive (download + transcribe + summarize, all billable)
+    # and only posts at the very end — bail for free if we can't post here.
     missing = bot_missing_channel_perms(interaction, RECAP_REQUIRED_PERMS)
     if missing:
         await interaction.followup.send(
@@ -62,83 +70,36 @@ async def recap(
         )
         return
 
-    channel_id = interaction.channel_id
+    post_channel_id = interaction.channel_id
     guild_id = interaction.guild_id
 
-    if state.get(channel_id) is not None:
+    if state.get(category_id) is not None:
         await interaction.followup.send(
-            "There's already an active job for this channel. Check your DMs for progress, or use `/stop` to cancel.",
+            f"There's already an active recap job for the **{category_name}** category. "
+            "Check your DMs for progress, or use `/stop` to cancel.",
             ephemeral=True,
         )
         return
 
-    if is_initializing(channel_id):
+    if is_initializing(category_id):
         await interaction.followup.send(
-            "Initialization is in progress. Wait for `/initialize` to finish.",
+            f"`/initialize` is running for the **{category_name}** category. "
+            "Wait for it to finish.",
             ephemeral=True,
         )
         return
 
-    # Snapshot channel state ONCE — we need the journal count for two checks
-    # below (empty-channel fast-path AND journals-synced drift check).
-    try:
-        current_entries = await discord_journals.list_for_channel(bot, channel_id)
-        current_count = len(current_entries)
-        scan_failed = False
-    except Exception:
-        current_count = 0
-        scan_failed = True
-
-    meta = await channel_files.read_meta(channel_id) or {}
-    has_ctx = await channel_files.has_context(channel_id)
-
-    if not has_ctx:
-        # No prior /initialize, no recap snapshots on disk.
-        if scan_failed:
-            await interaction.followup.send(
-                "Couldn't read channel history to determine state. Run `/initialize` "
-                "first to seed the roster and scratchpad.",
-                ephemeral=True,
-            )
-            return
-        if current_count > 0:
-            # Channel has organic journals but the bot has no state for them.
-            # Forcing /initialize first ensures the new recap chains correctly
-            # off the existing campaign content instead of overwriting it.
-            await interaction.followup.send(
-                f"This channel has **{current_count}** journal entr(y/ies) but no "
-                f"`/initialize` has been run. Run `/initialize` first to seed the "
-                f"roster and scratchpad from those entries — otherwise this recap "
-                f"would lose continuity with them.",
-                ephemeral=True,
-            )
-            return
-        # Empty channel + no prior state: skip the /initialize requirement.
-        # The orchestrator's read_context_for_recap returns ("", "") for this
-        # case and the LLM's roster/scratchpad steps will populate from the
-        # first recap's content. Seed meta.yaml with guild_id so subsequent
-        # reads have it (normally /initialize does this).
-        await channel_files.write_meta(channel_id, guild_id=guild_id or 0)
-    else:
-        # Prior state exists. Enforce that journals_synced is current so the
-        # new recap incorporates everything added to the channel since the
-        # last /initialize or /recap.
-        journals_synced = int(meta.get("journals_synced", 0))
-        if not scan_failed and current_count > journals_synced:
-            new_count = current_count - journals_synced
-            await interaction.followup.send(
-                f"⚠️ This channel has **{current_count}** journal entries but only "
-                f"**{journals_synced}** have been incorporated into the roster/scratchpad. "
-                f"{new_count} new entr(y/ies) need to be synced first — run "
-                f"`/initialize` to rebuild context, then re-run `/recap`.",
-                ephemeral=True,
-            )
-            return
-
+    # If the category has no roster/scratchpad yet (no /initialize), that's fine
+    # — the pipeline seeds from empty context and the LLM builds the first
+    # roster/scratchpad from this recap. If it does have context, we read +
+    # update it. Either way, seed meta with guild_id so it's recorded.
+    meta = await channel_files.read_meta(category_id) or {}
+    await channel_files.write_meta(category_id, guild_id=guild_id or 0)
     style_value = style.value if style else (meta.get("style") or settings.default_style)
 
     job = state.claim(
-        channel_id=channel_id,
+        category_id=category_id,
+        channel_id=post_channel_id,
         guild_id=guild_id or 0,
         requested_by=interaction.user.id,
         source_type=source_type,
@@ -148,9 +109,10 @@ async def recap(
         force=force,
     )
     if job is None:
-        # Race: another /recap claimed the slot between our check and claim
+        # Race: another /recap claimed this category between our check and claim
         await interaction.followup.send(
-            "There's already an active job for this channel. Check your DMs for progress, or use `/stop` to cancel.",
+            f"There's already an active recap job for the **{category_name}** category. "
+            "Check your DMs for progress, or use `/stop` to cancel.",
             ephemeral=True,
         )
         return
@@ -159,14 +121,17 @@ async def recap(
     # leave orphan state stuck for the rest of the bot's lifetime.
     try:
         queue: JobQueue = bot._job_queue
-        await queue.enqueue(channel_id)
+        await queue.enqueue(category_id)
 
-        msg = "📜 Queued. I'll post the recap in this channel when ready and DM you live progress."
+        msg = (
+            f"📜 Queued for **{category_name}**. I'll post the recap in this channel "
+            f"when ready and DM you live progress."
+        )
         if style:
             msg += f" Style override: **{style.value}**."
         if force:
             msg += " **Force re-download:** cached audio and chunks will be wiped."
         await interaction.followup.send(msg, ephemeral=True)
     except Exception:
-        state.release(channel_id)
+        state.release(category_id)
         raise

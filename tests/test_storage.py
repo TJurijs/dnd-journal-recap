@@ -15,7 +15,7 @@ def isolated_data_dir(monkeypatch):
     monkeypatch.setattr(channel_files.settings, "data_dir", Path(tmpdir))
     # Clear in-memory job state between tests
     state._active.clear()
-    channel_files._channel_locks.clear()
+    channel_files._category_locks.clear()
     yield Path(tmpdir)
 
 
@@ -25,14 +25,14 @@ def isolated_data_dir(monkeypatch):
 async def test_meta_round_trip(isolated_data_dir):
     assert await channel_files.read_meta(42) is None
     merged = await channel_files.write_meta(42, guild_id=999, name="Strahd", style="narrative")
-    assert merged["channel_id"] == 42
+    assert merged["category_id"] == 42
     assert merged["guild_id"] == 999
 
     read = await channel_files.read_meta(42)
     assert read["guild_id"] == 999
     assert read["name"] == "Strahd"
     assert read["style"] == "narrative"
-    assert read["channel_id"] == 42  # derived, not stored
+    assert read["category_id"] == 42  # derived, not stored
 
 
 @pytest.mark.asyncio
@@ -59,10 +59,10 @@ async def test_write_roster_writes_canonical_channel_root(isolated_data_dir):
     not in initialize/ or per-recap subdirs."""
     await channel_files.write_roster(42, "- Alice (Player)")
     await channel_files.write_scratchpad(42, "Session 1")
-    assert (isolated_data_dir / "channels" / "42" / "roster.md").exists()
-    assert (isolated_data_dir / "channels" / "42" / "scratchpad.md").exists()
+    assert (isolated_data_dir / "categories" / "42" / "roster.md").exists()
+    assert (isolated_data_dir / "categories" / "42" / "scratchpad.md").exists()
     # And initialize/ subdir is NOT created — that path is legacy-only.
-    assert not (isolated_data_dir / "channels" / "42" / "initialize" / "roster.md").exists()
+    assert not (isolated_data_dir / "categories" / "42" / "initialize" / "roster.md").exists()
 
 
 # ----- current roster/scratchpad chain (canonical → recap snapshot → initialize/) -----
@@ -80,7 +80,7 @@ async def test_read_falls_back_to_recap_snapshot_when_no_canonical(isolated_data
     """Pre-refactor channels stored roster.md inside each per-recap dir.
     Reading them keeps existing campaigns working without manual migration —
     the next /recap will materialize the canonical file."""
-    recap_dir = isolated_data_dir / "channels" / "42" / "recaps" / "0001_111"
+    recap_dir = isolated_data_dir / "categories" / "42" / "recaps" / "0001_111"
     (recap_dir / "chunks").mkdir(parents=True)
     (recap_dir / "roster.md").write_text("recap1 roster", encoding="utf-8")
     (recap_dir / "scratchpad.md").write_text("recap1 scratchpad", encoding="utf-8")
@@ -89,7 +89,7 @@ async def test_read_falls_back_to_recap_snapshot_when_no_canonical(isolated_data
     assert (await channel_files.read_scratchpad(42)) == "recap1 scratchpad"
 
     # A later recap takes over (newest-first walk)
-    later = isolated_data_dir / "channels" / "42" / "recaps" / "0002_222"
+    later = isolated_data_dir / "categories" / "42" / "recaps" / "0002_222"
     (later / "chunks").mkdir(parents=True)
     (later / "roster.md").write_text("recap2 roster", encoding="utf-8")
     (later / "scratchpad.md").write_text("recap2 scratchpad", encoding="utf-8")
@@ -100,7 +100,7 @@ async def test_read_falls_back_to_recap_snapshot_when_no_canonical(isolated_data
 @pytest.mark.asyncio
 async def test_canonical_beats_recap_snapshot_in_priority(isolated_data_dir):
     """If both exist (e.g. mid-migration), canonical wins."""
-    recap_dir = isolated_data_dir / "channels" / "42" / "recaps" / "0001_111"
+    recap_dir = isolated_data_dir / "categories" / "42" / "recaps" / "0001_111"
     (recap_dir / "chunks").mkdir(parents=True)
     (recap_dir / "roster.md").write_text("stale recap snapshot", encoding="utf-8")
     await channel_files.write_roster(42, "canonical wins")
@@ -110,7 +110,7 @@ async def test_canonical_beats_recap_snapshot_in_priority(isolated_data_dir):
 @pytest.mark.asyncio
 async def test_read_falls_back_to_initialize_subdir_legacy(isolated_data_dir):
     """Pre-refactor /initialize wrote into initialize/ subdir. Still readable."""
-    init_dir = isolated_data_dir / "channels" / "42" / "initialize"
+    init_dir = isolated_data_dir / "categories" / "42" / "initialize"
     init_dir.mkdir(parents=True)
     (init_dir / "roster.md").write_text("legacy init roster", encoding="utf-8")
     (init_dir / "scratchpad.md").write_text("legacy init scratchpad", encoding="utf-8")
@@ -230,8 +230,8 @@ def test_make_or_reuse_recap_dir_re_recap_reuses_folder(isolated_data_dir):
 
 
 def test_list_recap_dirs_sorts_by_seq(isolated_data_dir):
-    a = isolated_data_dir / "channels" / "42" / "recaps" / "0001_111"
-    b = isolated_data_dir / "channels" / "42" / "recaps" / "0002_222"
+    a = isolated_data_dir / "categories" / "42" / "recaps" / "0001_111"
+    b = isolated_data_dir / "categories" / "42" / "recaps" / "0002_222"
     for d in (a, b):
         (d / "chunks").mkdir(parents=True)
     dirs = channel_files.list_recap_dirs(42)
@@ -298,8 +298,8 @@ def test_recap_message_id_returns_none_for_garbage(isolated_data_dir):
 async def test_atomic_write_no_temp_leftover(isolated_data_dir):
     await channel_files.write_roster(42, "first")
     await channel_files.write_roster(42, "second")
-    channel_root = isolated_data_dir / "channels" / "42"
-    tmp_files = list(channel_root.glob(".tmp-*"))
+    category_root = isolated_data_dir / "categories" / "42"
+    tmp_files = list(category_root.glob(".tmp-*"))
     assert tmp_files == []
     assert (await channel_files.read_roster(42)) == "second"
 
@@ -308,7 +308,7 @@ async def test_atomic_write_no_temp_leftover(isolated_data_dir):
 
 def test_claim_release_lifecycle():
     job = state.claim(
-        channel_id=42, guild_id=1, requested_by=100,
+        category_id=42, channel_id=999, guild_id=1, requested_by=100,
         source_type="twitch", source_ref="https://twitch.tv/videos/1", style="bullets",
     )
     assert job is not None
@@ -316,7 +316,7 @@ def test_claim_release_lifecycle():
 
     # Second claim on the same channel is rejected
     second = state.claim(
-        channel_id=42, guild_id=1, requested_by=100,
+        category_id=42, channel_id=999, guild_id=1, requested_by=100,
         source_type="twitch", source_ref="https://twitch.tv/videos/1", style="bullets",
     )
     assert second is None
@@ -327,7 +327,7 @@ def test_claim_release_lifecycle():
 
 def test_cancel_marks_flag():
     state.claim(
-        channel_id=42, guild_id=1, requested_by=100,
+        category_id=42, channel_id=999, guild_id=1, requested_by=100,
         source_type="twitch", source_ref="x", style="bullets",
     )
     assert state.cancel(42) is True

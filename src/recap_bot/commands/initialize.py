@@ -7,8 +7,10 @@ from discord import app_commands
 from recap_bot.bot import bot
 from recap_bot.commands._helpers import (
     INITIALIZE_REQUIRED_PERMS,
+    NOT_IN_CATEGORY_MSG,
     bot_missing_channel_perms,
     format_channel_label,
+    resolve_category,
 )
 from recap_bot.pipeline import state
 from recap_bot.pipeline.initialize import (
@@ -60,7 +62,7 @@ class _ConfirmRebuildView(discord.ui.View):
 )
 @app_commands.default_permissions(manage_channels=True)
 async def initialize(interaction: discord.Interaction):
-    channel_id = interaction.channel_id
+    journal_channel_id = interaction.channel_id
     guild_id = interaction.guild_id
 
     if isinstance(interaction.channel, discord.DMChannel):
@@ -68,6 +70,14 @@ async def initialize(interaction: discord.Interaction):
             "Run `/initialize` in the campaign channel, not a DM.", ephemeral=True,
         )
         return
+
+    # Data is scoped to the channel's CATEGORY. /initialize reads THIS channel's
+    # journals but stores the resulting roster/scratchpad under the category.
+    cat = resolve_category(interaction)
+    if cat is None:
+        await interaction.response.send_message(NOT_IN_CATEGORY_MSG, ephemeral=True)
+        return
+    category_id, category_name = cat
 
     # Permission preflight — confirm the bot can read this channel's history
     # before scanning + running the (billable) build calls.
@@ -81,15 +91,17 @@ async def initialize(interaction: discord.Interaction):
         )
         return
 
-    if is_initializing(channel_id):
+    if is_initializing(category_id):
         await interaction.response.send_message(
-            "Initialization is already running in this channel.", ephemeral=True,
+            f"Initialization is already running for the **{category_name}** category.",
+            ephemeral=True,
         )
         return
 
-    if state.get(channel_id) is not None:
+    if state.get(category_id) is not None:
         await interaction.response.send_message(
-            "There's an active recap job. Wait for it to finish or `/stop` it first.",
+            f"There's an active recap job for the **{category_name}** category. "
+            "Wait for it to finish or `/stop` it first.",
             ephemeral=True,
         )
         return
@@ -97,7 +109,7 @@ async def initialize(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     channel_label = format_channel_label(interaction.channel)
-    already_initialized = await channel_files.has_context(channel_id)
+    already_initialized = await channel_files.has_context(category_id)
 
     if already_initialized:
         view = _ConfirmRebuildView(interaction.user.id)
@@ -134,16 +146,19 @@ async def initialize(interaction: discord.Interaction):
         )
         return
 
-    _initializing_channels.add(channel_id)
+    _initializing_channels.add(category_id)
     try:
         # run_initialization owns the final render — it keeps all per-step
         # progress visible and appends the summary, so we don't overwrite it.
-        await run_initialization(bot, dm_msg, channel_id, guild_id or 0, channel_label=channel_label)
+        await run_initialization(
+            bot, dm_msg, category_id, journal_channel_id, guild_id or 0,
+            channel_label=channel_label,
+        )
     except asyncio.CancelledError:
         # run_initialization already rendered the cancellation footer.
-        logger.info("Initialization cancelled for channel %s", channel_id)
+        logger.info("Initialization cancelled for category %s", category_id)
     except Exception as exc:
-        logger.exception("Initialization failed for channel %s", channel_id)
+        logger.exception("Initialization failed for category %s", category_id)
         await dm_msg.edit(content=f"❌ Initialization failed for **{channel_label}**:\n{str(exc)[:1500]}")
     finally:
-        _initializing_channels.discard(channel_id)
+        _initializing_channels.discard(category_id)

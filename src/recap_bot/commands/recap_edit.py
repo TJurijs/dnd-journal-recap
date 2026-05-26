@@ -15,6 +15,7 @@ import discord
 from discord import app_commands
 
 from recap_bot.bot import bot
+from recap_bot.commands._helpers import NOT_IN_CATEGORY_MSG, resolve_category
 from recap_bot.storage import discord_journals, files as channel_files
 
 logger = logging.getLogger(__name__)
@@ -48,10 +49,19 @@ async def recap_edit(
         )
         return
 
-    recap_dir = channel_files.find_recap_dir_for_vod(interaction.channel_id, vod_id)
+    # Recap storage is scoped to the category; the Discord post lives in
+    # whatever channel /recap was run in — run /recap_edit in that same channel
+    # so we can find + edit the post.
+    cat = resolve_category(interaction)
+    if cat is None:
+        await interaction.response.send_message(NOT_IN_CATEGORY_MSG, ephemeral=True)
+        return
+    category_id, _ = cat
+
+    recap_dir = channel_files.find_recap_dir_for_vod(category_id, vod_id)
     if recap_dir is None:
         await interaction.response.send_message(
-            f"No recap folder found for VOD `{vod_id}` in this channel.",
+            f"No recap folder found for VOD `{vod_id}` in this category.",
             ephemeral=True,
         )
         return
@@ -144,9 +154,8 @@ async def recap_edit(
     await interaction.followup.send(
         f"✅ Replaced `{rel_path}` ({len(new_text):,} chars) and swapped the "
         f"attachment on the original Discord post in this channel{extra}.\n"
-        f"Note: the recap folder's `roster.md` / `scratchpad.md` snapshots are "
-        f"unchanged — edit separately with "
-        f"`/roster action:edit vod_id:{vod_id}` / "
-        f"`/scratchpad action:edit vod_id:{vod_id}` if needed.",
+        f"Note: this only edits the per-recap journal. The category-wide roster "
+        f"and scratchpad already reflect this recap — tweak them with "
+        f"`/roster action:edit` / `/scratchpad action:edit` if needed.",
         ephemeral=True,
     )

@@ -56,6 +56,33 @@ MANAGE_CHANNELS_REQUIRED_MSG = (
 )
 
 
+# --- Category scoping --------------------------------------------------------
+#
+# The bot scopes all data (roster, scratchpad, recap history) to a Discord
+# CATEGORY, not a single channel. Every channel inside a category shares the
+# same store, so you can /initialize in the journal channel and /recap from a
+# separate recaps channel in the same category. A channel that isn't in any
+# category can't be scoped, so commands are refused there.
+
+NOT_IN_CATEGORY_MSG = (
+    "🔒 This channel isn't inside a **category**. This bot scopes each "
+    "campaign's roster, scratchpad, and recaps to a category — so all the "
+    "channels for one campaign (journal, recaps, etc.) live under the same "
+    "category and share state. Put this channel into a category and try again."
+)
+
+
+def resolve_category(interaction: discord.Interaction) -> tuple[int, str] | None:
+    """Return `(category_id, category_name)` for the interaction's channel, or
+    `None` if the channel isn't in a category (a DM, or an uncategorized
+    channel). `category_id` is the stable key the bot stores data under."""
+    channel = getattr(interaction, "channel", None)
+    category = getattr(channel, "category", None)
+    if category is None:
+        return None
+    return category.id, category.name
+
+
 # --- Channel permission preflight ---------------------------------------------
 #
 # Run a recap/initialize ONLY after confirming the bot can actually do the work

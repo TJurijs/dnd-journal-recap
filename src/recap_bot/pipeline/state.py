@@ -1,21 +1,22 @@
-"""In-memory active-job state, replacing the old `jobs` SQLite table.
+"""In-memory active-job state.
 
-The bot is single-process, single-worker (one job at a time via JobQueue).
-At most one active job per channel, so channel_id is the key. On bot restart
-all in-flight jobs are lost — same effective behavior as the old
-`mark_stalled_jobs_failed()`.
+Keyed by CATEGORY id (one active recap per category — channels in a category
+share a roster/scratchpad, so concurrent recaps would race). The job also
+carries `channel_id`, the channel /recap was invoked in, which is where the
+recap journal gets posted. On bot restart all in-flight jobs are lost.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
 
 @dataclass
 class ActiveJob:
-    channel_id: int
+    category_id: int                   # storage + state key (the campaign's category)
+    channel_id: int                    # POST target: the channel /recap was invoked in
     guild_id: int
     requested_by: int
     source_type: str
@@ -29,16 +30,17 @@ class ActiveJob:
     cancelled: bool = False
     vod_id: str = ""                   # VOD id (Twitch numeric or YouTube alphanum), parsed from source_ref
     title: str = ""                    # VOD title, for status display
-    channel_label: str = ""            # "Category / channel-name" — captured at invocation
+    channel_label: str = ""            # "Category / channel-name" of the post channel
     force: bool = False                # wipe cached audio/chunks before running
 
 
-_active: dict[int, ActiveJob] = {}
+_active: dict[int, ActiveJob] = {}   # keyed by category_id
 
 
 def claim(
-    channel_id: int,
+    category_id: int,
     *,
+    channel_id: int,
     guild_id: int,
     requested_by: int,
     source_type: str,
@@ -47,10 +49,12 @@ def claim(
     channel_label: str = "",
     force: bool = False,
 ) -> Optional[ActiveJob]:
-    """Atomically reserve the channel for a new job. Returns None if a job already exists."""
-    if channel_id in _active:
+    """Atomically reserve the CATEGORY for a new job. Returns None if a job
+    already exists for this category."""
+    if category_id in _active:
         return None
     job = ActiveJob(
+        category_id=category_id,
         channel_id=channel_id,
         guild_id=guild_id,
         requested_by=requested_by,
@@ -60,20 +64,20 @@ def claim(
         channel_label=channel_label,
         force=force,
     )
-    _active[channel_id] = job
+    _active[category_id] = job
     return job
 
 
-def get(channel_id: int) -> Optional[ActiveJob]:
-    return _active.get(channel_id)
+def get(category_id: int) -> Optional[ActiveJob]:
+    return _active.get(category_id)
 
 
-def release(channel_id: int) -> None:
-    _active.pop(channel_id, None)
+def release(category_id: int) -> None:
+    _active.pop(category_id, None)
 
 
-def cancel(channel_id: int) -> bool:
-    job = _active.get(channel_id)
+def cancel(category_id: int) -> bool:
+    job = _active.get(category_id)
     if job is None:
         return False
     job.cancelled = True

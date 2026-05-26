@@ -6,6 +6,7 @@ from discord import app_commands
 
 from recap_bot.bot import bot
 from recap_bot.commands._edit_button import make_edit_view
+from recap_bot.commands._helpers import NOT_IN_CATEGORY_MSG, resolve_category
 from recap_bot.storage import files as channel_files
 
 
@@ -26,18 +27,23 @@ def _format_roster(roster_text: str) -> str:
     return "\n\n".join(sections) or roster_text
 
 
-async def _do_show(interaction: discord.Interaction):
-    if isinstance(interaction.channel, discord.DMChannel):
-        await interaction.response.send_message(
-            "Use `/roster` in the channel where your campaign is tracked.", ephemeral=True
-        )
-        return
+def _require_manage(interaction: discord.Interaction) -> bool:
+    perms = interaction.user.guild_permissions if interaction.user else None
+    return bool(perms and perms.manage_channels)
 
-    roster_text = await channel_files.read_roster(interaction.channel_id)
+
+async def _do_show(interaction: discord.Interaction):
+    cat = resolve_category(interaction)
+    if cat is None:
+        await interaction.response.send_message(NOT_IN_CATEGORY_MSG, ephemeral=True)
+        return
+    category_id, _ = cat
+
+    roster_text = await channel_files.read_roster(category_id)
     if not roster_text:
         await interaction.response.send_message(
-            "📝 Roster is empty. Run `/initialize` (if the channel has prior journals) "
-            "or just `/recap` (if it's a fresh channel) to populate it.",
+            "📝 Roster is empty for this category. Run `/initialize` in the journal "
+            "channel, or just `/recap`, to populate it.",
             ephemeral=True,
         )
         return
@@ -53,59 +59,47 @@ async def _do_show(interaction: discord.Interaction):
 
 
 async def _do_delete(interaction: discord.Interaction):
-    if isinstance(interaction.channel, discord.DMChannel):
-        await interaction.response.send_message(
-            "Use `/roster action:delete` in the campaign channel.", ephemeral=True
-        )
+    cat = resolve_category(interaction)
+    if cat is None:
+        await interaction.response.send_message(NOT_IN_CATEGORY_MSG, ephemeral=True)
         return
+    category_id, _ = cat
 
-    perms = interaction.user.guild_permissions if interaction.user else None
-    if not (perms and perms.manage_channels):
+    if not _require_manage(interaction):
         await interaction.response.send_message(
             "You need the **Manage Channels** permission to delete the roster.",
             ephemeral=True,
         )
         return
 
-    deleted = await channel_files.clear_roster(interaction.channel_id)
+    deleted = await channel_files.clear_roster(category_id)
     if deleted is not None:
         try:
             rel = deleted.relative_to(deleted.parents[3])
         except (ValueError, IndexError):
             rel = deleted
         await interaction.response.send_message(
-            f"🗑️ Deleted `{rel}`. The next `/roster` will fall back to any legacy "
+            f"🗑️ Deleted `{rel}`. The next `/roster` falls back to any legacy "
             f"snapshot, then empty. Run `/initialize` or `/recap` to rebuild.",
             ephemeral=True,
         )
     else:
         await interaction.response.send_message(
-            "No roster to delete — this channel has no roster anywhere yet.",
+            "No roster to delete — this category has no roster anywhere yet.",
             ephemeral=True,
         )
 
 
-async def _do_edit(
-    interaction: discord.Interaction,
-    file: Optional[discord.Attachment],
-):
-    """Edit the channel's canonical roster.
-
-    With the single-canonical layout there's no per-recap roster to target —
-    there is one roster per channel and it's always at the channel root. The
-    optional `file` parameter both controls direction:
-      - file omitted → bot returns the current roster as an attachment for
-        you to download and edit locally
-      - file present → bot replaces the canonical roster with the upload
-    """
-    if isinstance(interaction.channel, discord.DMChannel):
-        await interaction.response.send_message(
-            "Use `/roster action:edit` in the campaign channel.", ephemeral=True
-        )
+async def _do_edit(interaction: discord.Interaction, file: Optional[discord.Attachment]):
+    """Edit the category's canonical roster. `file` omitted → download current;
+    `file` present → replace."""
+    cat = resolve_category(interaction)
+    if cat is None:
+        await interaction.response.send_message(NOT_IN_CATEGORY_MSG, ephemeral=True)
         return
+    category_id, _ = cat
 
-    perms = interaction.user.guild_permissions if interaction.user else None
-    if not (perms and perms.manage_channels):
+    if not _require_manage(interaction):
         await interaction.response.send_message(
             "You need the **Manage Channels** permission to edit the roster.",
             ephemeral=True,
@@ -113,9 +107,7 @@ async def _do_edit(
         return
 
     if file is None:
-        # Download path — use read_roster so legacy per-recap fallback still
-        # works for old channels that haven't materialized the canonical yet.
-        text = await channel_files.read_roster(interaction.channel_id)
+        text = await channel_files.read_roster(category_id)
         if not text:
             await interaction.response.send_message(
                 "No roster to download yet. Run `/initialize` or `/recap` first.",
@@ -139,9 +131,9 @@ async def _do_edit(
         )
         return
 
-    await channel_files.write_roster(interaction.channel_id, new_text)
+    await channel_files.write_roster(category_id, new_text)
     await interaction.response.send_message(
-        f"✅ Replaced the channel roster ({len(new_text):,} chars).",
+        f"✅ Replaced the category roster ({len(new_text):,} chars).",
         ephemeral=True,
     )
 

@@ -250,6 +250,47 @@ def test_cost_is_model_aware_and_totals_correctly(monkeypatch):
     assert abs(t.total_cost_usd - 12.5) < 1e-9
 
 
+def test_resolve_category_returns_id_and_name():
+    from recap_bot.commands._helpers import resolve_category
+
+    class _Cat:
+        id = 555
+        name = "Starry Knights"
+
+    class _Channel:
+        category = _Cat()
+
+    class _Interaction:
+        channel = _Channel()
+
+    assert resolve_category(_Interaction()) == (555, "Starry Knights")
+
+
+def test_resolve_category_none_when_uncategorized():
+    from recap_bot.commands._helpers import resolve_category
+
+    class _Channel:
+        category = None
+
+    class _Interaction:
+        channel = _Channel()
+
+    assert resolve_category(_Interaction()) is None
+
+
+def test_resolve_category_none_for_dm():
+    from recap_bot.commands._helpers import resolve_category
+
+    # A DM channel has no `category` attribute at all → treated as uncategorized.
+    class _DMChannel:
+        pass
+
+    class _Interaction:
+        channel = _DMChannel()
+
+    assert resolve_category(_Interaction()) is None
+
+
 def test_extract_usage_tags_model():
     from recap_bot.pipeline.cost import extract_usage
 
