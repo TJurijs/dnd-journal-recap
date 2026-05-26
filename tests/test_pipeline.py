@@ -1,6 +1,17 @@
+import tempfile
+from pathlib import Path
+
 import pytest
 
-from recap_bot.pipeline.download import _TWITCH_RE, _YOUTUBE_RE, detect_source, get_vod_id
+from recap_bot.pipeline.download import (
+    _TWITCH_RE,
+    _YOUTUBE_RE,
+    _is_youtube_bot_block,
+    _youtube_cookies_path,
+    _youtube_yt_dlp_opts,
+    detect_source,
+    get_vod_id,
+)
 
 
 # ----- Twitch URL regex -----
@@ -81,3 +92,54 @@ def test_get_vod_id_returns_id():
 def test_get_vod_id_raises_for_unsupported():
     with pytest.raises(ValueError):
         get_vod_id("https://example.com/video/42")
+
+
+# ----- YouTube auth (anti-bot) helpers -----
+
+def test_youtube_yt_dlp_opts_includes_player_clients():
+    """Less-gated player_clients listed in preference order so yt-dlp falls
+    through them on datacenter IPs where the default 'web' client gets
+    blocked."""
+    opts = _youtube_yt_dlp_opts()
+    clients = opts["extractor_args"]["youtube"]["player_client"]
+    assert "mweb" in clients
+    assert "web" in clients
+    # 'mweb' should come before 'web' — it's historically less gated.
+    assert clients.index("mweb") < clients.index("web")
+
+
+def test_youtube_yt_dlp_opts_omits_cookies_when_file_absent(monkeypatch):
+    from recap_bot.config import settings as live_settings
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(live_settings, "data_dir", Path(td))
+        opts = _youtube_yt_dlp_opts()
+        assert "cookiefile" not in opts
+
+
+def test_youtube_yt_dlp_opts_attaches_cookies_when_file_present(monkeypatch):
+    from recap_bot.config import settings as live_settings
+    with tempfile.TemporaryDirectory() as td:
+        monkeypatch.setattr(live_settings, "data_dir", Path(td))
+        cookies_path = _youtube_cookies_path()
+        cookies_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+        opts = _youtube_yt_dlp_opts()
+        assert opts["cookiefile"] == str(cookies_path)
+
+
+@pytest.mark.parametrize("message", [
+    "ERROR: [youtube] xyz: Sign in to confirm you're not a bot. Use --cookies-from-browser",
+    "ERROR: Please sign in to confirm you are not a bot.",
+    "confirm you're not a bot",
+])
+def test_is_youtube_bot_block_detects_canonical_messages(message):
+    assert _is_youtube_bot_block(Exception(message))
+
+
+@pytest.mark.parametrize("message", [
+    "ERROR: HTTP 404 Not Found",
+    "Connection refused",
+    "Video is private",
+    "",
+])
+def test_is_youtube_bot_block_ignores_unrelated_errors(message):
+    assert not _is_youtube_bot_block(Exception(message))

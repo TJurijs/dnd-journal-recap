@@ -25,6 +25,7 @@ from recap_bot.commands._helpers import (
     user_has_manage_channels_anywhere,
 )
 from recap_bot.config import model_config, settings
+from recap_bot.pipeline.download import _youtube_cookies_path
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,25 @@ def _check_binary(name: str) -> tuple[bool, str]:
     if path:
         return True, f"`{name}` at `{path}`"
     return False, f"`{name}` not on PATH"
+
+
+def _check_youtube_cookies() -> tuple[str, str]:
+    """Not a pass/fail — YouTube cookies are optional, but their presence
+    determines whether `/recap` on YouTube URLs will work from a datacenter IP.
+    Returns (icon, message)."""
+    path = _youtube_cookies_path()
+    if path.exists():
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        return "✅", f"YouTube cookies present at `{path}` ({size:,} bytes)"
+    return (
+        "⚠️",
+        f"No YouTube cookies at `{path}` — YouTube URLs may fail with "
+        f"\"Sign in to confirm\" from this server's datacenter IP. "
+        f"Twitch is unaffected.",
+    )
 
 
 def _check_guild() -> tuple[bool, str]:
@@ -135,6 +155,10 @@ async def check(interaction: discord.Interaction):
     for binary in (settings.ffmpeg_bin, "yt-dlp"):
         ok, msg = _check_binary(binary)
         results.append(f"{'✅' if ok else '❌'} Binary: {msg}")
+
+    # 4b. YouTube cookies (optional — only needed if /recap is used on YouTube)
+    icon, msg = _check_youtube_cookies()
+    results.append(f"{icon} YouTube auth: {msg}")
 
     # 5. LLM call (the slow one)
     ok, msg, elapsed = await _check_llm()

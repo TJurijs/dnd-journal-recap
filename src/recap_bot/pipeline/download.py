@@ -49,6 +49,67 @@ def get_vod_id(url: str) -> str:
     return detected[1]
 
 
+# ----- YouTube-specific yt-dlp options ---------------------------------------
+#
+# YouTube has been escalating its anti-bot measures, especially against
+# datacenter IPs (like Hetzner). The default `web` player_client gets the bot
+# stuck behind "Sign in to confirm you're not a bot" within a few requests.
+# Two mitigations:
+#
+#   1. extractor_args player_client — yt-dlp's YouTube extractor supports
+#      multiple "player clients" (web, mweb, tv_embedded, web_embedded, …).
+#      The non-`web` ones use different API endpoints that are gated less
+#      aggressively. Listing several lets yt-dlp fall through if one fails.
+#
+#   2. cookiefile — if the user has placed an exported cookies file at
+#      <data_dir>/youtube_cookies.txt, attach it. Authenticated requests
+#      reliably bypass the anti-bot check. Cookies are sensitive (they're a
+#      browser session token) so we never commit them; the file lives only on
+#      the server's data volume.
+
+_YOUTUBE_COOKIES_FILENAME = "youtube_cookies.txt"
+
+_YOUTUBE_BOT_BLOCK_MARKERS = (
+    "sign in to confirm",
+    "not a bot",
+    "confirm you're not a bot",
+)
+
+YOUTUBE_AUTH_HINT = (
+    "YouTube blocked the download — server IPs like Hetzner's get flagged as "
+    "bots. To enable YouTube, install a browser extension such as 'Get "
+    "cookies.txt LOCALLY', open a logged-in youtube.com tab, export cookies, "
+    "and SCP the file to `/opt/dnd-recap-bot/data/youtube_cookies.txt` on the "
+    "server. No bot restart needed — yt-dlp picks it up on the next /recap. "
+    "Twitch VODs work without this."
+)
+
+
+def _youtube_cookies_path() -> Path:
+    return settings.data_dir / _YOUTUBE_COOKIES_FILENAME
+
+
+def _youtube_yt_dlp_opts() -> dict:
+    """Extra yt-dlp options applied to YouTube URLs only."""
+    opts: dict = {
+        "extractor_args": {
+            "youtube": {
+                # Try less-gated clients first. yt-dlp falls through each.
+                "player_client": ["mweb", "tv_embedded", "web_embedded", "web"],
+            },
+        },
+    }
+    cookies = _youtube_cookies_path()
+    if cookies.exists():
+        opts["cookiefile"] = str(cookies)
+    return opts
+
+
+def _is_youtube_bot_block(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _YOUTUBE_BOT_BLOCK_MARKERS)
+
+
 _OG_TITLE_RE = re.compile(
     r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']',
     re.IGNORECASE,
@@ -100,12 +161,15 @@ async def get_vod_info(url: str) -> dict:
          yt-dlp's API path breaks; YouTube's yt-dlp extractor is the most
          maintained one upstream so we don't need a parallel HTML scrape)
     """
-    if detect_source(url) is None:
+    src = detect_source(url)
+    if src is None:
         raise ValueError(f"Unsupported VOD URL: {url!r} (must be Twitch or YouTube)")
 
     url = url.split("?t=")[0].split("&t=")[0]
 
-    opts = {"quiet": True, "noprogress": True}
+    opts: dict = {"quiet": True, "noprogress": True}
+    if src[0] == "youtube":
+        opts.update(_youtube_yt_dlp_opts())
 
     def _probe():
         with yt_dlp.YoutubeDL(opts) as ydl:
@@ -118,6 +182,14 @@ async def get_vod_info(url: str) -> dict:
 
     try:
         result = await asyncio.to_thread(_probe)
+    except yt_dlp.utils.DownloadError as exc:
+        # Convert YouTube's bot-block into an actionable hint instead of the
+        # raw "Sign in to confirm..." traceback. Other errors fall through to
+        # the HTML-title fallback (Twitch) or "Unknown VOD".
+        if _is_youtube_bot_block(exc):
+            raise ValueError(YOUTUBE_AUTH_HINT) from exc
+        logger.warning("yt-dlp probe failed for %s — trying HTML fallback", url, exc_info=True)
+        result = {"title": "", "duration": 0, "uploader": "Unknown"}
     except Exception:
         logger.warning("yt-dlp probe failed for %s — trying HTML fallback", url, exc_info=True)
         result = {"title": "", "duration": 0, "uploader": "Unknown"}
@@ -136,7 +208,8 @@ async def get_vod_info(url: str) -> dict:
 
 
 async def download_vod(url: str, dest_dir: Path, job_id: int, progress_queue: asyncio.Queue | None = None) -> Path:
-    if detect_source(url) is None:
+    src = detect_source(url)
+    if src is None:
         raise ValueError(f"Unsupported VOD URL: {url!r} (must be Twitch or YouTube)")
 
     # Strip timestamps
@@ -161,6 +234,8 @@ async def download_vod(url: str, dest_dir: Path, job_id: int, progress_queue: as
     }
     if settings.download_rate_limit:
         opts["ratelimit"] = settings.download_rate_limit
+    if src[0] == "youtube":
+        opts.update(_youtube_yt_dlp_opts())
 
     loop = asyncio.get_running_loop()
 
@@ -189,20 +264,25 @@ async def download_vod(url: str, dest_dir: Path, job_id: int, progress_queue: as
 
             opts["progress_hooks"] = [_hook]
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            duration = info.get("duration", 0)
-            max_seconds = settings.max_vod_hours * 3600
-            if duration > max_seconds:
-                raise ValueError(
-                    f"VOD is {duration//3600}h{duration%3600//60}m, max allowed is {settings.max_vod_hours}h"
-                )
-            ydl.download([url])
-            # Find the downloaded source file
-            files = sorted(dest_dir.glob("source.*"))
-            if not files:
-                raise RuntimeError("Download completed but no file found")
-            # Return the largest file (the actual download, not any sidecar)
-            return max(files, key=lambda p: p.stat().st_size)
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                duration = info.get("duration", 0)
+                max_seconds = settings.max_vod_hours * 3600
+                if duration > max_seconds:
+                    raise ValueError(
+                        f"VOD is {duration//3600}h{duration%3600//60}m, max allowed is {settings.max_vod_hours}h"
+                    )
+                ydl.download([url])
+        except yt_dlp.utils.DownloadError as exc:
+            if _is_youtube_bot_block(exc):
+                raise ValueError(YOUTUBE_AUTH_HINT) from exc
+            raise
+        # Find the downloaded source file (after a successful download).
+        files = sorted(dest_dir.glob("source.*"))
+        if not files:
+            raise RuntimeError("Download completed but no file found")
+        # Return the largest file (the actual download, not any sidecar)
+        return max(files, key=lambda p: p.stat().st_size)
 
     return await asyncio.to_thread(_download)
