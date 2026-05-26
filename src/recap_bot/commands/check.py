@@ -131,7 +131,6 @@ def _models_summary() -> str:
     keys = [
         "transcribe", "summarize",
         "roster_build", "scratchpad_build",
-        "roster_canonicalize", "scratchpad_canonicalize",
         "update_roster", "update_scratchpad",
     ]
     return "\n".join(f"  • {k}: `{model_config.get(k)}`" for k in keys)

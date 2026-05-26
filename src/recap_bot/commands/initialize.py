@@ -5,7 +5,11 @@ import discord
 from discord import app_commands
 
 from recap_bot.bot import bot
-from recap_bot.commands._helpers import format_channel_label
+from recap_bot.commands._helpers import (
+    INITIALIZE_REQUIRED_PERMS,
+    bot_missing_channel_perms,
+    format_channel_label,
+)
 from recap_bot.pipeline import state
 from recap_bot.pipeline.initialize import (
     _initializing_channels,
@@ -62,6 +66,18 @@ async def initialize(interaction: discord.Interaction):
     if isinstance(interaction.channel, discord.DMChannel):
         await interaction.response.send_message(
             "Run `/initialize` in the campaign channel, not a DM.", ephemeral=True,
+        )
+        return
+
+    # Permission preflight — confirm the bot can read this channel's history
+    # before scanning + running the (billable) build calls.
+    missing = bot_missing_channel_perms(interaction, INITIALIZE_REQUIRED_PERMS)
+    if missing:
+        await interaction.response.send_message(
+            f"🔒 I can't initialize from this channel — I'm missing: "
+            f"**{', '.join(missing)}**. Ask a server admin to grant these to me "
+            f"(or my role) here, then try again.",
+            ephemeral=True,
         )
         return
 

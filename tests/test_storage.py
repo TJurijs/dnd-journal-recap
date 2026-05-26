@@ -236,26 +236,6 @@ def test_list_recap_dirs_sorts_by_seq(isolated_data_dir):
         (d / "chunks").mkdir(parents=True)
     dirs = channel_files.list_recap_dirs(42)
     assert [p.name for p in dirs] == [a.name, b.name]
-    assert channel_files.latest_recap_dir(42) == b
-
-
-def test_prior_recap_dir_for_new_vod_returns_latest(isolated_data_dir):
-    """A brand-new VOD chains from the latest existing recap."""
-    a = channel_files.make_or_reuse_recap_dir(42, "111")
-    b = channel_files.make_or_reuse_recap_dir(42, "222")
-    # Asking about a NEW vod returns the latest existing
-    assert channel_files.prior_recap_dir(42, "999") == b
-
-
-def test_prior_recap_dir_for_re_recap_returns_one_before(isolated_data_dir):
-    """Re-recapping an existing VOD chains from the recap before it."""
-    a = channel_files.make_or_reuse_recap_dir(42, "111")
-    b = channel_files.make_or_reuse_recap_dir(42, "222")
-    c = channel_files.make_or_reuse_recap_dir(42, "333")
-    # Re-recap of 222: prior should be 111
-    assert channel_files.prior_recap_dir(42, "222") == a
-    # Re-recap of the FIRST recap: no prior (caller falls back to initialize/)
-    assert channel_files.prior_recap_dir(42, "111") is None
 
 
 @pytest.mark.asyncio

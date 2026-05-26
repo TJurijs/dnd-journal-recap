@@ -143,3 +143,45 @@ def test_is_youtube_bot_block_detects_canonical_messages(message):
 ])
 def test_is_youtube_bot_block_ignores_unrelated_errors(message):
     assert not _is_youtube_bot_block(Exception(message))
+
+
+# ----- channel permission preflight -----
+
+def test_preflight_flags_missing_attach_files():
+    import discord
+    from recap_bot.commands._helpers import _missing_perms, RECAP_REQUIRED_PERMS
+    # journal-tribe case: can view/send/read but Attach Files denied
+    perms = discord.Permissions(
+        view_channel=True, read_message_history=True,
+        send_messages=True, attach_files=False,
+    )
+    assert _missing_perms(perms, RECAP_REQUIRED_PERMS) == ["Attach Files"]
+
+
+def test_preflight_passes_when_all_present():
+    import discord
+    from recap_bot.commands._helpers import _missing_perms, RECAP_REQUIRED_PERMS
+    perms = discord.Permissions(
+        view_channel=True, read_message_history=True,
+        send_messages=True, attach_files=True,
+    )
+    assert _missing_perms(perms, RECAP_REQUIRED_PERMS) == []
+
+
+def test_preflight_reports_multiple_missing_in_order():
+    import discord
+    from recap_bot.commands._helpers import _missing_perms, RECAP_REQUIRED_PERMS
+    perms = discord.Permissions.none()  # nothing granted
+    missing = _missing_perms(perms, RECAP_REQUIRED_PERMS)
+    assert missing == ["View Channel", "Read Message History", "Send Messages", "Attach Files"]
+
+
+def test_preflight_initialize_needs_only_view_and_history():
+    import discord
+    from recap_bot.commands._helpers import _missing_perms, INITIALIZE_REQUIRED_PERMS
+    # No send/attach is fine for initialize (it only reads + DMs)
+    perms = discord.Permissions(view_channel=True, read_message_history=True)
+    assert _missing_perms(perms, INITIALIZE_REQUIRED_PERMS) == []
+    # Missing history is flagged
+    perms2 = discord.Permissions(view_channel=True)
+    assert _missing_perms(perms2, INITIALIZE_REQUIRED_PERMS) == ["Read Message History"]

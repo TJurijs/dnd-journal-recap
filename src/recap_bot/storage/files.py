@@ -129,11 +129,6 @@ def list_recap_dirs(channel_id: int) -> list[Path]:
     )
 
 
-def latest_recap_dir(channel_id: int) -> Optional[Path]:
-    dirs = list_recap_dirs(channel_id)
-    return dirs[-1] if dirs else None
-
-
 def find_recap_dir_for_vod(channel_id: int, vod_id: str) -> Optional[Path]:
     """Return the existing recap folder for this VOD, or None if no recap yet."""
     for d in list_recap_dirs(channel_id):
@@ -141,27 +136,6 @@ def find_recap_dir_for_vod(channel_id: int, vod_id: str) -> Optional[Path]:
         if m and m.group("vod_id") == vod_id:
             return d
     return None
-
-
-def prior_recap_dir(channel_id: int, vod_id: str) -> Optional[Path]:
-    """The recap immediately preceding `vod_id` in chronological order.
-
-    Used by /recap to chain roster/scratchpad from the right snapshot:
-      - new VOD → last folder
-      - re-recap of existing VOD → the folder before it
-      - first ever recap (or re-recap of first) → None (caller falls back to initialize/)
-    """
-    dirs = list_recap_dirs(channel_id)
-    if not dirs:
-        return None
-    existing = find_recap_dir_for_vod(channel_id, vod_id)
-    if existing is None:
-        # New VOD — chain from latest
-        return dirs[-1]
-    idx = dirs.index(existing)
-    if idx == 0:
-        return None  # re-recap of the very first recap → chain from initialize/
-    return dirs[idx - 1]
 
 
 def make_or_reuse_recap_dir(channel_id: int, vod_id: str) -> Path:

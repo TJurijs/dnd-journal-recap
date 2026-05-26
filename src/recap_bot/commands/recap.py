@@ -2,7 +2,11 @@ import discord
 from discord import app_commands
 
 from recap_bot.bot import bot
-from recap_bot.commands._helpers import format_channel_label
+from recap_bot.commands._helpers import (
+    RECAP_REQUIRED_PERMS,
+    bot_missing_channel_perms,
+    format_channel_label,
+)
 from recap_bot.config import settings
 from recap_bot.pipeline import state
 from recap_bot.pipeline.download import detect_source
@@ -41,6 +45,22 @@ async def recap(
         )
         return
     source_type, _vod_id = detected
+
+    # Permission preflight — the recap pipeline is expensive (download +
+    # transcribe + summarize, all billable) and only posts the result at the
+    # very end. Bail BEFORE any of that if the bot can't post here, so a
+    # locked-down channel never costs you a doomed API run.
+    missing = bot_missing_channel_perms(interaction, RECAP_REQUIRED_PERMS)
+    if missing:
+        await interaction.followup.send(
+            f"🔒 I can't run a recap in this channel — I'm missing: "
+            f"**{', '.join(missing)}**.\n"
+            f"Ask a server admin to grant these to me (or my role) in this "
+            f"channel's permission settings, then try again. "
+            f"(No API cost incurred — I check before starting.)",
+            ephemeral=True,
+        )
+        return
 
     channel_id = interaction.channel_id
     guild_id = interaction.guild_id
