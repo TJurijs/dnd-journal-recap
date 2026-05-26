@@ -424,3 +424,28 @@ def test_write_override_rejects_non_overridable(isolated_data_dir):
     import pytest
     with pytest.raises(ValueError):
         _write_override("discord_bot_token", "secret")  # not in RUNTIME_OVERRIDABLE
+
+
+def test_discord_guild_id_is_runtime_overridable(isolated_data_dir):
+    """The /settings add_guild / remove_guild flow writes discord_guild_id, so
+    it must be in RUNTIME_OVERRIDABLE (otherwise _write_override rejects it)."""
+    from recap_bot.commands.settings import _write_override
+    from recap_bot import config
+
+    _write_override("discord_guild_id", "111,222")
+    import yaml
+    saved = yaml.safe_load(config.runtime_config_path().read_text())
+    assert saved["discord_guild_id"] == "111,222"
+
+
+@pytest.mark.parametrize("raw,expected", [
+    ("1505296799982682262", 1505296799982682262),
+    ("  123  ", 123),
+    ("notanumber", None),
+    ("", None),
+    ("-5", None),         # isdigit() rejects the minus sign
+    ("12.5", None),
+])
+def test_parse_guild_id(raw, expected):
+    from recap_bot.commands.settings import _parse_guild_id
+    assert _parse_guild_id(raw) == expected

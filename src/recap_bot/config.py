@@ -20,6 +20,9 @@ RUNTIME_OVERRIDABLE = frozenset({
     "default_style",
     "download_rate_limit",
     "ffmpeg_bin",
+    # Comma-separated guild id list. Overridable so the owner can add/remove
+    # servers from a Discord DM via /settings without SSHing to edit .env.
+    "discord_guild_id",
 })
 
 
