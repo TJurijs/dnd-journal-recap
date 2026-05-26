@@ -359,6 +359,35 @@ def test_cancel_nonexistent_returns_false():
     assert state.cancel(9999) is False
 
 
+# ----- multi-guild DISCORD_GUILD_ID parsing -----
+
+def test_guild_ids_empty():
+    from recap_bot.config import Settings
+    s = Settings(discord_bot_token="x", gemini_api_key="y", discord_guild_id="")
+    assert s.guild_ids == []
+    assert s.guild_id_as_int is None
+
+
+def test_guild_ids_single():
+    from recap_bot.config import Settings
+    s = Settings(discord_bot_token="x", gemini_api_key="y", discord_guild_id="12345")
+    assert s.guild_ids == [12345]
+    assert s.guild_id_as_int == 12345  # back-compat: first id
+
+
+def test_guild_ids_comma_separated():
+    from recap_bot.config import Settings
+    s = Settings(discord_bot_token="x", gemini_api_key="y", discord_guild_id="111, 222,333")
+    assert s.guild_ids == [111, 222, 333]
+    assert s.guild_id_as_int == 111  # back-compat: first id
+
+
+def test_guild_ids_ignores_garbage_parts():
+    from recap_bot.config import Settings
+    s = Settings(discord_bot_token="x", gemini_api_key="y", discord_guild_id="111,notanid,222")
+    assert s.guild_ids == [111, 222]
+
+
 # ----- /settings helpers -----
 
 def test_settings_mask_short():

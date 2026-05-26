@@ -48,7 +48,46 @@ class Settings(BaseSettings):
 
     @property
     def guild_id_as_int(self) -> int | None:
-        return int(self.discord_guild_id) if self.discord_guild_id else None
+        """Back-compat: return the FIRST configured guild id, or None.
+
+        New code should use `guild_ids` instead — `DISCORD_GUILD_ID` now
+        accepts a comma-separated list to support multi-server deployments.
+        """
+        ids = self.guild_ids
+        return ids[0] if ids else None
+
+    @property
+    def guild_ids(self) -> list[int]:
+        """Parse DISCORD_GUILD_ID into a list of guild ids.
+
+        Accepts:
+          - empty string → no instant-sync guilds (commands sync globally only,
+            which has up to a 1h propagation lag — fine for production but
+            painful during development)
+          - single id: "12345"
+          - comma-separated: "12345, 67890, 11111"
+
+        Each id gets channel commands synced instantly. DM-only commands
+        (`/jobs`, `/check`, `/settings`) are always global regardless — they
+        need to be global to appear in DM autocomplete.
+
+        Multi-guild support keeps the fast-iteration workflow that single-guild
+        gives us, while letting one bot instance serve several Discord servers.
+        Adding a new server = append the id to the env var and restart.
+        """
+        raw = (self.discord_guild_id or "").strip()
+        if not raw:
+            return []
+        out: list[int] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                out.append(int(part))
+            except ValueError:
+                logger.warning("Ignoring non-integer guild id in DISCORD_GUILD_ID: %r", part)
+        return out
 
 
 settings = Settings()

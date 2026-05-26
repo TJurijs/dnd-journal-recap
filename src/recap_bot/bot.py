@@ -47,27 +47,43 @@ async def on_ready():
         dm_only = [c for c in all_globals if _is_dm_only(c)]
         channel_cmds = [c for c in all_globals if not _is_dm_only(c)]
 
-        if settings.guild_id_as_int:
-            guild = discord.Object(id=settings.guild_id_as_int)
-
+        guild_ids = settings.guild_ids
+        if guild_ids:
             # Rebuild the local tree:
             #   - DM-only commands stay global (must be global to appear in DM autocomplete)
-            #   - Channel commands get guild-scoped for instant sync
+            #   - Channel commands get guild-scoped to EACH configured guild
+            #     for instant sync (no 1h global-command propagation)
+            guild_objs = [discord.Object(id=gid) for gid in guild_ids]
+
             bot.tree.clear_commands(guild=None)
             for cmd in dm_only:
                 bot.tree.add_command(cmd)
             for cmd in channel_cmds:
-                bot.tree.add_command(cmd, guild=guild)
+                for guild_obj in guild_objs:
+                    bot.tree.add_command(cmd, guild=guild_obj)
 
             synced_global = await bot.tree.sync(guild=None)
-            synced_guild = await bot.tree.sync(guild=guild)
+
+            # Sync to each guild independently — a failure for one guild (e.g.
+            # the bot isn't actually invited yet) shouldn't block the others.
+            per_guild_counts: list[str] = []
+            for guild_obj in guild_objs:
+                try:
+                    synced = await bot.tree.sync(guild=guild_obj)
+                    per_guild_counts.append(f"{guild_obj.id}={len(synced)}")
+                except Exception:
+                    logger.exception(
+                        "Failed to sync channel commands to guild %s (is the bot invited there?)",
+                        guild_obj.id,
+                    )
+                    per_guild_counts.append(f"{guild_obj.id}=FAILED")
             logger.info(
-                "Synced %d global (DM-only) command(s) and %d guild command(s) to guild %s",
-                len(synced_global), len(synced_guild), settings.guild_id_as_int,
+                "Synced %d global (DM-only) command(s); per-guild channel commands: %s",
+                len(synced_global), ", ".join(per_guild_counts),
             )
         else:
             synced = await bot.tree.sync()
-            logger.info("Synced %d commands globally", len(synced))
+            logger.info("Synced %d commands globally (no DISCORD_GUILD_ID set)", len(synced))
     except Exception:
         logger.exception("Failed to sync commands")
 

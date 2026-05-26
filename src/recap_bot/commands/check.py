@@ -67,34 +67,45 @@ def _check_youtube_cookies() -> tuple[str, str]:
 
 
 def _check_guild() -> tuple[bool, str]:
-    """Report on the configured home guild + enumerate every guild the bot has joined.
+    """Report on configured home guilds + enumerate every guild the bot joined.
 
-    The enumeration matters during multi-server rollouts: after changing
-    DISCORD_GUILD_ID or sending a new invite link, `/check` is how you confirm
-    the bot actually landed in the right place.
+    With multi-guild support `DISCORD_GUILD_ID` can hold a comma-separated
+    list. We check that the bot is actually a member of each one (and flag
+    any it isn't yet — usually means the invite link still needs to be used).
     """
-    gid = settings.guild_id_as_int
+    home_ids = settings.guild_ids
     member_guilds = list(bot.guilds)
+    member_id_set = {g.id for g in member_guilds}
+
+    def _annotate(g) -> str:
+        tag = " [home]" if g.id in home_ids else ""
+        return f"   • `{g.name}` ({g.id}){tag}"
+
     member_lines = (
-        "\n".join(f"   • `{g.name}` ({g.id})" for g in member_guilds)
+        "\n".join(_annotate(g) for g in member_guilds)
         if member_guilds
         else "   (not in any guilds yet)"
     )
 
-    if not gid:
+    if not home_ids:
         return True, (
-            f"no `DISCORD_GUILD_ID` set (global command sync). "
-            f"Member of {len(member_guilds)} guild(s):\n{member_lines}"
+            f"no `DISCORD_GUILD_ID` set (global command sync only — up to 1h "
+            f"propagation lag). Member of {len(member_guilds)} guild(s):\n{member_lines}"
         )
 
-    home = bot.get_guild(gid)
-    if home is None:
+    missing = [gid for gid in home_ids if gid not in member_id_set]
+    if missing:
+        miss_str = ", ".join(f"`{g}`" for g in missing)
         return False, (
-            f"home guild `{gid}` NOT visible — has the bot been invited there?\n"
+            f"{len(home_ids)} home guild(s) configured but bot is NOT a member of: "
+            f"{miss_str}. Invite the bot to each missing guild and `/check` again.\n"
             f"   Currently member of {len(member_guilds)} guild(s):\n{member_lines}"
         )
+
     return True, (
-        f"home `{home.name}` ({gid}). Member of {len(member_guilds)} guild(s):\n{member_lines}"
+        f"{len(home_ids)} home guild(s) configured, bot is a member of all of them. "
+        f"Channel commands sync instantly to each.\n"
+        f"   Member of {len(member_guilds)} guild(s):\n{member_lines}"
     )
 
 
