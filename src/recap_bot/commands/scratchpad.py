@@ -143,5 +143,5 @@ def _register(name: str, description: str) -> None:
             await _do_show(interaction)
 
 
-_register("scratchpad", "Show or manage the campaign scratchpad")
-_register("pad", "Show or manage the campaign scratchpad (alias for /scratchpad)")
+_register("scratchpad", "📜 Recap: Show or manage the campaign scratchpad")
+_register("pad", "📜 Recap: Manage the campaign scratchpad (alias for /scratchpad)")

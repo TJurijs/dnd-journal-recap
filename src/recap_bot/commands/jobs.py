@@ -119,7 +119,7 @@ def _build_jobs_view() -> tuple[str, discord.ui.View | None]:
 
 @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)
 @app_commands.allowed_installs(guilds=True, users=False)
-@bot.tree.command(name="jobs", description="List all active jobs (DM only, Manage Channels)")
+@bot.tree.command(name="jobs", description="📜 Recap: List all active jobs (DM only, Manage Channels)")
 async def jobs(interaction: discord.Interaction):
     if not await user_has_manage_channels_anywhere(bot, interaction.user.id):
         await interaction.response.send_message(MANAGE_CHANNELS_REQUIRED_MSG, ephemeral=True)

@@ -146,7 +146,7 @@ async def _do_edit(
     )
 
 
-@bot.tree.command(name="roster", description="Show or manage the campaign roster")
+@bot.tree.command(name="roster", description="📜 Recap: Show or manage the campaign roster")
 @app_commands.default_permissions(manage_channels=True)
 @app_commands.describe(
     action="show (default), delete, or edit",

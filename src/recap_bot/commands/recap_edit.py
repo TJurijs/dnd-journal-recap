@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 @bot.tree.command(
     name="recap_edit",
-    description="Replace a recap's journal.md and update the Discord post in place",
+    description="📜 Recap: Replace a recap's journal.md and update the Discord post",
 )
 @app_commands.describe(
     vod_id="Twitch VOD ID of the recap to edit (e.g. 2455113742)",

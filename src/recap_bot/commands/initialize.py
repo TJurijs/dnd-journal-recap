@@ -52,7 +52,7 @@ class _ConfirmRebuildView(discord.ui.View):
 
 @bot.tree.command(
     name="initialize",
-    description="Build roster and scratchpad from this channel's existing journals",
+    description="📜 Recap: Build roster + scratchpad from this channel's existing journals",
 )
 @app_commands.default_permissions(manage_channels=True)
 async def initialize(interaction: discord.Interaction):

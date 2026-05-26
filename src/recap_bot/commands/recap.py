@@ -13,7 +13,7 @@ from recap_bot.storage import discord_journals, files as channel_files
 
 @bot.tree.command(
     name="recap",
-    description="Generate a session recap from a Twitch or YouTube VOD",
+    description="📜 Recap: Generate a session recap from a Twitch or YouTube VOD",
 )
 @app_commands.default_permissions(manage_channels=True)
 @app_commands.describe(

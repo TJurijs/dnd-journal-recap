@@ -57,7 +57,7 @@ async def _restart_container_after(delay: float) -> None:
 
 settings_group = app_commands.Group(
     name="settings",
-    description="Bot owner settings (DM only)",
+    description="📜 Recap: Bot owner settings (DM only)",
     # DM-only at the group level so Discord hides it from guild slash menus.
     # Per-subcommand allowed_contexts is ignored by Discord for Groups.
     allowed_contexts=app_commands.AppCommandContext(
