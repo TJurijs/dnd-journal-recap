@@ -216,17 +216,37 @@ def write_recap_message_id(recap_dir: Path, message_id: int) -> None:
 
 # --- Current roster/scratchpad (latest recap → initialize → legacy channel root) ---
 
+def canonical_roster_path(channel_id: int) -> Path:
+    """The one true roster.md for this channel.
+
+    Both /initialize and /recap write here; /roster and the recap-context
+    reader read from here. This is the single source of truth — older
+    per-recap and initialize/ snapshots are still readable for backward
+    compat but the bot stops creating new ones.
+    """
+    return _channel_root(channel_id) / "roster.md"
+
+
+def canonical_scratchpad_path(channel_id: int) -> Path:
+    return _channel_root(channel_id) / "scratchpad.md"
+
+
 def _roster_source_path(channel_id: int) -> Optional[Path]:
-    """Locate the most authoritative roster.md for this channel.
+    """Locate the roster.md to display.
 
     Order:
-      1. Walk recap dirs newest→oldest, return the first one with roster.md.
-         (The simple "latest only" approach broke `/roster action:delete` —
-         deleting the latest recap's roster.md would skip straight to
-         initialize/ instead of falling through to the previous snapshot.)
-      2. initialize/roster.md
-      3. Legacy channel-root roster.md (pre-restructure layout)
+      1. Canonical channel-root roster.md — what current /initialize and
+         /recap write to. This is the source of truth.
+      2. Legacy: walk recap dirs newest→oldest. Older bot versions wrote
+         per-recap roster snapshots; reading them keeps existing campaigns
+         working without manual migration. The next /recap will materialize
+         the canonical file from this content.
+      3. Legacy: initialize/roster.md. Same story for the older initialize
+         subdirectory layout.
     """
+    canonical = canonical_roster_path(channel_id)
+    if canonical.exists():
+        return canonical
     for recap_dir in reversed(list_recap_dirs(channel_id)):
         p = recap_dir / "roster.md"
         if p.exists():
@@ -234,14 +254,14 @@ def _roster_source_path(channel_id: int) -> Optional[Path]:
     init_path = initialize_dir(channel_id) / "roster.md"
     if init_path.exists():
         return init_path
-    legacy = _channel_root(channel_id) / "roster.md"
-    if legacy.exists():
-        return legacy
     return None
 
 
 def _scratchpad_source_path(channel_id: int) -> Optional[Path]:
-    """Symmetric with `_roster_source_path` — walks recap dirs newest→oldest."""
+    """Symmetric with `_roster_source_path`."""
+    canonical = canonical_scratchpad_path(channel_id)
+    if canonical.exists():
+        return canonical
     for recap_dir in reversed(list_recap_dirs(channel_id)):
         p = recap_dir / "scratchpad.md"
         if p.exists():
@@ -249,9 +269,6 @@ def _scratchpad_source_path(channel_id: int) -> Optional[Path]:
     init_path = initialize_dir(channel_id) / "scratchpad.md"
     if init_path.exists():
         return init_path
-    legacy = _channel_root(channel_id) / "scratchpad.md"
-    if legacy.exists():
-        return legacy
     return None
 
 
@@ -266,49 +283,42 @@ async def read_scratchpad(channel_id: int) -> Optional[str]:
     return path.read_text(encoding="utf-8") if path else None
 
 
-async def read_context_for_recap(channel_id: int, vod_id: str) -> tuple[str, str]:
-    """Roster + scratchpad to seed THIS recap with, based on chronology.
+async def read_context_for_recap(channel_id: int) -> tuple[str, str]:
+    """Roster + scratchpad to seed THIS recap with.
 
-    For a NEW vod: chain from the latest recap.
-    For a RE-recap (vod has a folder): chain from the recap immediately before it.
-    Either way: fall back to initialize/ if no prior recap; empty strings if neither.
+    Reads the canonical channel-wide roster/scratchpad. Re-recaps no longer
+    chain off a per-recap snapshot — there's a single roster that
+    accumulates, and the LLM's update step is designed to merge new
+    information into existing entries (PREFER UPDATING OVER ADDING).
     """
-    prior = prior_recap_dir(channel_id, vod_id)
-    if prior is not None:
-        roster = (prior / "roster.md")
-        scratch = (prior / "scratchpad.md")
-        return (
-            roster.read_text(encoding="utf-8") if roster.exists() else "",
-            scratch.read_text(encoding="utf-8") if scratch.exists() else "",
-        )
-    init = initialize_dir(channel_id)
-    r = init / "roster.md"
-    s = init / "scratchpad.md"
-    legacy_root = _channel_root(channel_id)
-    return (
-        r.read_text(encoding="utf-8") if r.exists()
-        else (legacy_root / "roster.md").read_text(encoding="utf-8") if (legacy_root / "roster.md").exists()
-        else "",
-        s.read_text(encoding="utf-8") if s.exists()
-        else (legacy_root / "scratchpad.md").read_text(encoding="utf-8") if (legacy_root / "scratchpad.md").exists()
-        else "",
-    )
+    roster = await read_roster(channel_id)
+    scratchpad = await read_scratchpad(channel_id)
+    return roster or "", scratchpad or ""
 
 
 # --- /initialize writes ---
 
-async def write_initialize_roster(channel_id: int, text: str) -> Path:
+async def write_roster(channel_id: int, text: str) -> Path:
+    """Write the canonical roster.md at the channel root. Used by /initialize
+    AND every /recap — there's no per-recap or per-initialize copy anymore."""
     async with channel_lock(channel_id):
-        path = initialize_dir(channel_id) / "roster.md"
+        path = canonical_roster_path(channel_id)
         _atomic_write_text(path, text)
         return path
 
 
-async def write_initialize_scratchpad(channel_id: int, text: str) -> Path:
+async def write_scratchpad(channel_id: int, text: str) -> Path:
+    """Write the canonical scratchpad.md at the channel root."""
     async with channel_lock(channel_id):
-        path = initialize_dir(channel_id) / "scratchpad.md"
+        path = canonical_scratchpad_path(channel_id)
         _atomic_write_text(path, text)
         return path
+
+
+# Back-compat aliases — older code (and tests written against the previous
+# layout) called these. New callers should use write_roster / write_scratchpad.
+write_initialize_roster = write_roster
+write_initialize_scratchpad = write_scratchpad
 
 
 # --- Generic write to any directory (used by /recap to write into recap dir) ---
@@ -325,14 +335,17 @@ async def has_context(channel_id: int) -> bool:
 
 
 async def clear_context(channel_id: int) -> None:
-    """Delete roster + scratchpad from initialize/ AND legacy channel-root location.
-    Recap folder snapshots are NOT touched — they're permanent history."""
+    """Delete both canonical roster.md and scratchpad.md.
+
+    Used by /initialize when it builds a fresh roster/scratchpad and wants a
+    clean slate. Legacy per-recap and initialize/ snapshots are NOT touched —
+    they're orphaned remnants from before the single-canonical refactor and
+    not in the writer path anymore.
+    """
     async with channel_lock(channel_id):
         for path in (
-            initialize_dir(channel_id) / "roster.md",
-            initialize_dir(channel_id) / "scratchpad.md",
-            _channel_root(channel_id) / "roster.md",
-            _channel_root(channel_id) / "scratchpad.md",
+            canonical_roster_path(channel_id),
+            canonical_scratchpad_path(channel_id),
         ):
             if path.exists():
                 path.unlink()

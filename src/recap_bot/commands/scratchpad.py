@@ -1,5 +1,4 @@
 from io import BytesIO
-from pathlib import Path
 from typing import Literal, Optional
 
 import discord
@@ -8,19 +7,6 @@ from discord import app_commands
 from recap_bot.bot import bot
 from recap_bot.commands._edit_button import make_edit_view
 from recap_bot.storage import files as channel_files
-
-
-def _resolve_scratchpad_path(channel_id: int, vod_id: Optional[str]) -> Optional[Path]:
-    if vod_id:
-        recap = channel_files.find_recap_dir_for_vod(channel_id, vod_id)
-        if recap is None:
-            return None
-        return recap / "scratchpad.md"
-    latest = channel_files.latest_recap_dir(channel_id)
-    if latest is not None:
-        return latest / "scratchpad.md"
-    init_path = channel_files.initialize_dir(channel_id) / "scratchpad.md"
-    return init_path if init_path.exists() else None
 
 
 async def _do_show(interaction: discord.Interaction):
@@ -33,7 +19,9 @@ async def _do_show(interaction: discord.Interaction):
     scratchpad_text = await channel_files.read_scratchpad(interaction.channel_id)
     if not scratchpad_text:
         await interaction.response.send_message(
-            "📝 Scratchpad is empty. Run `/initialize` to build it from your journal history.", ephemeral=True
+            "📝 Scratchpad is empty. Run `/initialize` (if the channel has prior journals) "
+            "or just `/recap` (if it's a fresh channel) to populate it.",
+            ephemeral=True,
         )
         return
 
@@ -68,9 +56,8 @@ async def _do_delete(interaction: discord.Interaction):
         except (ValueError, IndexError):
             rel = deleted
         await interaction.response.send_message(
-            f"🗑️ Deleted `{rel}`. The next `/scratchpad` falls back to the previous "
-            f"snapshot (if any), then `/initialize` content, then empty. Run "
-            f"`/scratchpad action:delete` again to keep peeling back.",
+            f"🗑️ Deleted `{rel}`. The next `/scratchpad` will fall back to any "
+            f"legacy snapshot, then empty. Run `/initialize` or `/recap` to rebuild.",
             ephemeral=True,
         )
     else:
@@ -83,8 +70,10 @@ async def _do_delete(interaction: discord.Interaction):
 async def _do_edit(
     interaction: discord.Interaction,
     file: Optional[discord.Attachment],
-    vod_id: Optional[str],
 ):
+    """Edit the channel's canonical scratchpad. Same single-file model as
+    `/roster action:edit`: no per-recap target, one canonical file at the
+    channel root."""
     if isinstance(interaction.channel, discord.DMChannel):
         await interaction.response.send_message(
             "Use this in the campaign channel.", ephemeral=True
@@ -99,26 +88,18 @@ async def _do_edit(
         )
         return
 
-    target = _resolve_scratchpad_path(interaction.channel_id, vod_id)
-    if target is None:
-        await interaction.response.send_message(
-            f"No scratchpad found for {('VOD ' + vod_id) if vod_id else 'this channel'}. "
-            "Run `/initialize` (or `/recap`) first.",
-            ephemeral=True,
-        )
-        return
-
     if file is None:
-        if not target.exists():
+        text = await channel_files.read_scratchpad(interaction.channel_id)
+        if not text:
             await interaction.response.send_message(
-                f"The target scratchpad doesn't exist yet at `{target.relative_to(target.parents[3])}`.",
+                "No scratchpad to download yet. Run `/initialize` or `/recap` first.",
                 ephemeral=True,
             )
             return
         await interaction.response.send_message(
-            f"📥 Current scratchpad from `{target.parent.name}`. Edit and re-run "
-            f"`/scratchpad action:edit file:<your edited file>` to replace it.",
-            file=discord.File(str(target), filename="scratchpad.md"),
+            "📥 Current scratchpad. Edit locally and re-run "
+            "`/scratchpad action:edit file:<your edited file>` to replace it.",
+            file=discord.File(BytesIO(text.encode("utf-8")), filename="scratchpad.md"),
             ephemeral=True,
         )
         return
@@ -132,10 +113,9 @@ async def _do_edit(
         )
         return
 
-    channel_files.write_text_atomic(target, new_text)
-    rel_path = target.relative_to(target.parents[3])
+    await channel_files.write_scratchpad(interaction.channel_id, new_text)
     await interaction.response.send_message(
-        f"✅ Replaced `{rel_path}` ({len(new_text):,} chars).",
+        f"✅ Replaced the channel scratchpad ({len(new_text):,} chars).",
         ephemeral=True,
     )
 
@@ -149,18 +129,16 @@ def _register(name: str, description: str) -> None:
     @app_commands.describe(
         action="show (default), delete, or edit",
         file="For action=edit: a scratchpad.md file to replace the current scratchpad with",
-        vod_id="For action=edit: a specific recap's VOD ID (default = latest)",
     )
     async def _cmd(
         interaction: discord.Interaction,
         action: Optional[Literal["show", "delete", "edit"]] = None,
         file: Optional[discord.Attachment] = None,
-        vod_id: Optional[str] = None,
     ):
         if action == "delete":
             await _do_delete(interaction)
         elif action == "edit":
-            await _do_edit(interaction, file, vod_id)
+            await _do_edit(interaction, file)
         else:
             await _do_show(interaction)
 

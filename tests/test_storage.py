@@ -54,29 +54,32 @@ async def test_get_style_default(isolated_data_dir):
 # ----- /initialize writes -----
 
 @pytest.mark.asyncio
-async def test_initialize_writes_to_initialize_subfolder(isolated_data_dir):
-    await channel_files.write_initialize_roster(42, "- Alice (Player)")
-    await channel_files.write_initialize_scratchpad(42, "Session 1")
-    assert (isolated_data_dir / "channels" / "42" / "initialize" / "roster.md").exists()
-    assert (isolated_data_dir / "channels" / "42" / "initialize" / "scratchpad.md").exists()
+async def test_write_roster_writes_canonical_channel_root(isolated_data_dir):
+    """Single-canonical layout: roster + scratchpad live at the channel root,
+    not in initialize/ or per-recap subdirs."""
+    await channel_files.write_roster(42, "- Alice (Player)")
+    await channel_files.write_scratchpad(42, "Session 1")
+    assert (isolated_data_dir / "channels" / "42" / "roster.md").exists()
+    assert (isolated_data_dir / "channels" / "42" / "scratchpad.md").exists()
+    # And initialize/ subdir is NOT created — that path is legacy-only.
+    assert not (isolated_data_dir / "channels" / "42" / "initialize" / "roster.md").exists()
 
 
-# ----- current roster/scratchpad chain (latest recap → initialize → legacy) -----
-
-@pytest.mark.asyncio
-async def test_read_falls_back_to_initialize_when_no_recaps(isolated_data_dir):
-    await channel_files.write_initialize_roster(42, "init roster")
-    await channel_files.write_initialize_scratchpad(42, "init scratchpad")
-    assert (await channel_files.read_roster(42)) == "init roster"
-    assert (await channel_files.read_scratchpad(42)) == "init scratchpad"
-
+# ----- current roster/scratchpad chain (canonical → recap snapshot → initialize/) -----
 
 @pytest.mark.asyncio
-async def test_read_prefers_latest_recap(isolated_data_dir):
-    await channel_files.write_initialize_roster(42, "init roster")
-    await channel_files.write_initialize_scratchpad(42, "init scratchpad")
+async def test_read_returns_canonical_when_present(isolated_data_dir):
+    await channel_files.write_roster(42, "canonical roster")
+    await channel_files.write_scratchpad(42, "canonical scratchpad")
+    assert (await channel_files.read_roster(42)) == "canonical roster"
+    assert (await channel_files.read_scratchpad(42)) == "canonical scratchpad"
 
-    # Make a recap dir manually with the new seq-prefixed naming
+
+@pytest.mark.asyncio
+async def test_read_falls_back_to_recap_snapshot_when_no_canonical(isolated_data_dir):
+    """Pre-refactor channels stored roster.md inside each per-recap dir.
+    Reading them keeps existing campaigns working without manual migration —
+    the next /recap will materialize the canonical file."""
     recap_dir = isolated_data_dir / "channels" / "42" / "recaps" / "0001_111"
     (recap_dir / "chunks").mkdir(parents=True)
     (recap_dir / "roster.md").write_text("recap1 roster", encoding="utf-8")
@@ -85,7 +88,7 @@ async def test_read_prefers_latest_recap(isolated_data_dir):
     assert (await channel_files.read_roster(42)) == "recap1 roster"
     assert (await channel_files.read_scratchpad(42)) == "recap1 scratchpad"
 
-    # A later recap takes over
+    # A later recap takes over (newest-first walk)
     later = isolated_data_dir / "channels" / "42" / "recaps" / "0002_222"
     (later / "chunks").mkdir(parents=True)
     (later / "roster.md").write_text("recap2 roster", encoding="utf-8")
@@ -95,14 +98,24 @@ async def test_read_prefers_latest_recap(isolated_data_dir):
 
 
 @pytest.mark.asyncio
-async def test_read_falls_back_to_legacy_root(isolated_data_dir):
-    """Pre-restructure layout: roster.md at channel root."""
-    root = isolated_data_dir / "channels" / "42"
-    root.mkdir(parents=True)
-    (root / "roster.md").write_text("legacy roster", encoding="utf-8")
-    (root / "scratchpad.md").write_text("legacy scratchpad", encoding="utf-8")
-    assert (await channel_files.read_roster(42)) == "legacy roster"
-    assert (await channel_files.read_scratchpad(42)) == "legacy scratchpad"
+async def test_canonical_beats_recap_snapshot_in_priority(isolated_data_dir):
+    """If both exist (e.g. mid-migration), canonical wins."""
+    recap_dir = isolated_data_dir / "channels" / "42" / "recaps" / "0001_111"
+    (recap_dir / "chunks").mkdir(parents=True)
+    (recap_dir / "roster.md").write_text("stale recap snapshot", encoding="utf-8")
+    await channel_files.write_roster(42, "canonical wins")
+    assert (await channel_files.read_roster(42)) == "canonical wins"
+
+
+@pytest.mark.asyncio
+async def test_read_falls_back_to_initialize_subdir_legacy(isolated_data_dir):
+    """Pre-refactor /initialize wrote into initialize/ subdir. Still readable."""
+    init_dir = isolated_data_dir / "channels" / "42" / "initialize"
+    init_dir.mkdir(parents=True)
+    (init_dir / "roster.md").write_text("legacy init roster", encoding="utf-8")
+    (init_dir / "scratchpad.md").write_text("legacy init scratchpad", encoding="utf-8")
+    assert (await channel_files.read_roster(42)) == "legacy init roster"
+    assert (await channel_files.read_scratchpad(42)) == "legacy init scratchpad"
 
 
 # ----- has_context / clear -----
@@ -133,12 +146,13 @@ async def test_clear_context_removes_initialize_files(isolated_data_dir):
 # ----- /roster action:delete / /scratchpad action:delete (clear_*) -----
 
 @pytest.mark.asyncio
-async def test_clear_roster_deletes_initialize_when_no_recaps(isolated_data_dir):
-    await channel_files.write_initialize_roster(42, "init roster")
+async def test_clear_roster_deletes_canonical(isolated_data_dir):
+    await channel_files.write_roster(42, "canonical roster")
     deleted = await channel_files.clear_roster(42)
     assert deleted is not None
     assert deleted.name == "roster.md"
-    assert "initialize" in deleted.parts
+    # Canonical lives at the channel root, not in any subdir.
+    assert deleted.parent.name == "42"
     assert (await channel_files.read_roster(42)) is None
 
 
@@ -245,32 +259,25 @@ def test_prior_recap_dir_for_re_recap_returns_one_before(isolated_data_dir):
 
 
 @pytest.mark.asyncio
-async def test_read_context_for_recap_chains_from_prior(isolated_data_dir):
-    await channel_files.write_initialize_roster(42, "init roster")
-    await channel_files.write_initialize_scratchpad(42, "init scratchpad")
+async def test_read_context_for_recap_returns_canonical(isolated_data_dir):
+    """With the single-canonical layout, every /recap reads the same channel-
+    wide roster + scratchpad. No per-recap-snapshot chaining: the LLM's
+    update step is what merges the new session's information into the
+    accumulating roster."""
+    await channel_files.write_roster(42, "canonical roster")
+    await channel_files.write_scratchpad(42, "canonical scratchpad")
+    r, s = await channel_files.read_context_for_recap(42)
+    assert r == "canonical roster"
+    assert s == "canonical scratchpad"
 
-    a = channel_files.make_or_reuse_recap_dir(42, "111")
-    (a / "roster.md").write_text("game 51 roster", encoding="utf-8")
-    (a / "scratchpad.md").write_text("game 51 scratchpad", encoding="utf-8")
 
-    b = channel_files.make_or_reuse_recap_dir(42, "222")
-    (b / "roster.md").write_text("game 52 roster", encoding="utf-8")
-    (b / "scratchpad.md").write_text("game 52 scratchpad", encoding="utf-8")
-
-    # New VOD chains from latest (game 52)
-    r, s = await channel_files.read_context_for_recap(42, "999")
-    assert r == "game 52 roster"
-    assert s == "game 52 scratchpad"
-
-    # Re-recap of game 52 chains from game 51 (the prior)
-    r, s = await channel_files.read_context_for_recap(42, "222")
-    assert r == "game 51 roster"
-    assert s == "game 51 scratchpad"
-
-    # Re-recap of the FIRST game chains from initialize/
-    r, s = await channel_files.read_context_for_recap(42, "111")
-    assert r == "init roster"
-    assert s == "init scratchpad"
+@pytest.mark.asyncio
+async def test_read_context_for_recap_empty_when_nothing(isolated_data_dir):
+    """Empty channel + no prior state: pipeline gets ("", "") so the LLM
+    starts from scratch."""
+    r, s = await channel_files.read_context_for_recap(42)
+    assert r == ""
+    assert s == ""
 
 
 # ----- journal cache -----
@@ -309,10 +316,10 @@ def test_recap_message_id_returns_none_for_garbage(isolated_data_dir):
 
 @pytest.mark.asyncio
 async def test_atomic_write_no_temp_leftover(isolated_data_dir):
-    await channel_files.write_initialize_roster(42, "first")
-    await channel_files.write_initialize_roster(42, "second")
-    init_dir = isolated_data_dir / "channels" / "42" / "initialize"
-    tmp_files = list(init_dir.glob(".tmp-*"))
+    await channel_files.write_roster(42, "first")
+    await channel_files.write_roster(42, "second")
+    channel_root = isolated_data_dir / "channels" / "42"
+    tmp_files = list(channel_root.glob(".tmp-*"))
     assert tmp_files == []
     assert (await channel_files.read_roster(42)) == "second"
 

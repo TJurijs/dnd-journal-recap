@@ -74,11 +74,13 @@ Rules:
    - Phonetic similarities: "Sana"/"Xana" → pick the canonical form
    - Spacing/casing: "kal ruin" → "Kalruin", "black water" → "Blackwater"
    - Short/long forms: "Rob" → "Robert", "Patch" → "Patchwork"
-4. Use 1-2 sentence descriptions focused on the character's **current state and role**, not a plot recap:
-   - Class / role / type (wizard, ranger, captain, dragon, etc.)
-   - Key relationships ("Kaladin's pet", "captain of the Iron Tide", "Schoks's friend")
-   - Current condition if notable (alive, dead, transformed, missing a limb, imprisoned)
-   - If you mention past events, list them in **chronological order** — earliest record first, latest record last. Treat the record numbering (RECORD 1 → RECORD N) as the timeline. Pick at most 1-2 defining events.
+4. Use 1-2 sentence descriptions focused on **who the character IS, not what they did this week**:
+   - Class / role / type / faction (wizard, ranger, captain of the Iron Tide, queen of X, ancient dragon, etc.)
+   - Key relationships ("Kaladin's pet", "rival of Schoks", "consort of Queen Dinara")
+   - Long-term motivation or arc ("seeking a trade alliance with Demmi", "hunting the cult of Avagaru", "in exile from her homeland")
+   - Persistent state if notable (dead, departed, transformed, imprisoned, ruling X, secretly cursed)
+
+   DO NOT include single-session events. Bad: "teleported the party back to Issic and used a teddy bear to pacify a cloaked guardian." Good: "Tactical magic-user pursuing a trade alliance with Demmi to clear Issic of monsters." Single-session events belong in the scratchpad, not the roster. The roster is reference material that stays stable across sessions.
 5. Do NOT skip named characters just because they only appear in one session — include them.
 6. Exclude clearly generic unnamed characters ("a guard", "the bartender", "townsfolk").
 7. Order: ALL Player characters first (in order of introduction), then ALL NPCs (in order of introduction).
@@ -212,7 +214,7 @@ CRITICAL RULES:
 
 3. ONLY ADD GENUINELY NEW NAMED CHARACTERS — i.e. someone who appears in this journal and has no spelling-variant match in the existing roster.
 
-4. Use 1-2 sentence descriptions focused on the character's current state/role + key relationships. If you mention past events, list them in chronological order.
+4. Descriptions focus on **who the character IS** — class/role/faction, key relationships, long-term motivation, persistent state. DO NOT mention what happened *this session*: those events belong in the scratchpad. Bad: "teleported the party back to Issic this session." Good: "Tactical magic-user pursuing trade alliance with Demmi." The roster is reference material that should stay roughly stable across sessions; only update when an enduring fact actually changes (someone dies, transforms, switches sides, gains a permanent title, etc.).
 
 5. Exclude clearly generic unnamed characters ("a guard", "townsfolk").
 

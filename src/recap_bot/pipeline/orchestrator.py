@@ -296,7 +296,7 @@ async def run_job(bot, channel_id: int) -> None:
         # state). For a re-recap of game N, this means we read game N-1's
         # snapshot — same as the original recap saw — so the new snapshot is
         # produced from the same starting point.
-        roster_text, scratchpad_text = await channel_files.read_context_for_recap(channel_id, vod_id)
+        roster_text, scratchpad_text = await channel_files.read_context_for_recap(channel_id)
 
         _check_cancelled(channel_id)
 
@@ -499,9 +499,12 @@ async def run_job(bot, channel_id: int) -> None:
 
         # Write all artifacts into THIS recap's folder. The next /recap reads
         # roster.md/scratchpad.md from here as the chained "current" state.
+        # journal.md stays per-recap (one per session). roster + scratchpad
+        # are channel-wide — one canonical pair, accumulated across all
+        # recaps. No per-recap snapshots.
         channel_files.write_text_atomic(recap_dir / "journal.md", journal_md)
-        channel_files.write_text_atomic(recap_dir / "roster.md", new_roster)
-        channel_files.write_text_atomic(recap_dir / "scratchpad.md", new_scratchpad)
+        await channel_files.write_roster(channel_id, new_roster)
+        await channel_files.write_scratchpad(channel_id, new_scratchpad)
 
         # --- Step 8: Post journal to Discord ---
         _mark_ui(channel_id, "post", "current", tool="discord")

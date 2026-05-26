@@ -89,8 +89,8 @@ async def run_initialization(
     _check_init_cancelled(channel_id)
 
     if not entries:
-        await channel_files.write_initialize_roster(channel_id, "")
-        await channel_files.write_initialize_scratchpad(channel_id, "")
+        await channel_files.write_roster(channel_id, "")
+        await channel_files.write_scratchpad(channel_id, "")
         await channel_files.write_meta(channel_id, journals_synced=0)
         step_log.total(status="empty")
         try:
@@ -239,8 +239,8 @@ async def run_initialization(
     finally:
         heartbeat.cancel()
 
-    await channel_files.write_initialize_roster(channel_id, roster_text)
-    await channel_files.write_initialize_scratchpad(channel_id, scratchpad_text)
+    await channel_files.write_roster(channel_id, roster_text)
+    await channel_files.write_scratchpad(channel_id, scratchpad_text)
     await channel_files.write_meta(channel_id, journals_synced=len(entries))
     step_log.total(status="done")
 

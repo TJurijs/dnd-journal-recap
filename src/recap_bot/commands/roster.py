@@ -1,5 +1,4 @@
 from io import BytesIO
-from pathlib import Path
 from typing import Literal, Optional
 
 import discord
@@ -27,26 +26,6 @@ def _format_roster(roster_text: str) -> str:
     return "\n\n".join(sections) or roster_text
 
 
-def _resolve_roster_path(channel_id: int, vod_id: Optional[str]) -> Optional[Path]:
-    """Which roster.md file does `action:edit` touch?
-
-    - vod_id given → that specific recap's roster.md (must exist)
-    - else → latest recap's roster.md
-    - else → initialize/roster.md
-    - else → None (nothing to edit yet)
-    """
-    if vod_id:
-        recap = channel_files.find_recap_dir_for_vod(channel_id, vod_id)
-        if recap is None:
-            return None
-        return recap / "roster.md"
-    latest = channel_files.latest_recap_dir(channel_id)
-    if latest is not None:
-        return latest / "roster.md"
-    init_path = channel_files.initialize_dir(channel_id) / "roster.md"
-    return init_path if init_path.exists() else None
-
-
 async def _do_show(interaction: discord.Interaction):
     if isinstance(interaction.channel, discord.DMChannel):
         await interaction.response.send_message(
@@ -57,7 +36,9 @@ async def _do_show(interaction: discord.Interaction):
     roster_text = await channel_files.read_roster(interaction.channel_id)
     if not roster_text:
         await interaction.response.send_message(
-            "📝 Roster is empty. Run `/initialize` to build it from your journal history.", ephemeral=True
+            "📝 Roster is empty. Run `/initialize` (if the channel has prior journals) "
+            "or just `/recap` (if it's a fresh channel) to populate it.",
+            ephemeral=True,
         )
         return
 
@@ -93,15 +74,13 @@ async def _do_delete(interaction: discord.Interaction):
         except (ValueError, IndexError):
             rel = deleted
         await interaction.response.send_message(
-            f"🗑️ Deleted `{rel}`. The next `/roster` falls back to the previous "
-            f"snapshot (if any), then `/initialize` content, then empty. Run "
-            f"`/roster action:delete` again to keep peeling back.",
+            f"🗑️ Deleted `{rel}`. The next `/roster` will fall back to any legacy "
+            f"snapshot, then empty. Run `/initialize` or `/recap` to rebuild.",
             ephemeral=True,
         )
     else:
         await interaction.response.send_message(
-            "No roster to delete — this channel has no roster anywhere "
-            "(no initialize/, no recap snapshots, no legacy file).",
+            "No roster to delete — this channel has no roster anywhere yet.",
             ephemeral=True,
         )
 
@@ -109,8 +88,16 @@ async def _do_delete(interaction: discord.Interaction):
 async def _do_edit(
     interaction: discord.Interaction,
     file: Optional[discord.Attachment],
-    vod_id: Optional[str],
 ):
+    """Edit the channel's canonical roster.
+
+    With the single-canonical layout there's no per-recap roster to target —
+    there is one roster per channel and it's always at the channel root. The
+    optional `file` parameter both controls direction:
+      - file omitted → bot returns the current roster as an attachment for
+        you to download and edit locally
+      - file present → bot replaces the canonical roster with the upload
+    """
     if isinstance(interaction.channel, discord.DMChannel):
         await interaction.response.send_message(
             "Use `/roster action:edit` in the campaign channel.", ephemeral=True
@@ -125,33 +112,24 @@ async def _do_edit(
         )
         return
 
-    target = _resolve_roster_path(interaction.channel_id, vod_id)
-    if target is None:
-        await interaction.response.send_message(
-            f"No roster found for {('VOD ' + vod_id) if vod_id else 'this channel'}. "
-            "Run `/initialize` (or `/recap`) first.",
-            ephemeral=True,
-        )
-        return
-
     if file is None:
-        # No file uploaded — return the current roster so the user can download,
-        # edit locally, and re-run the command with the file attached.
-        if not target.exists():
+        # Download path — use read_roster so legacy per-recap fallback still
+        # works for old channels that haven't materialized the canonical yet.
+        text = await channel_files.read_roster(interaction.channel_id)
+        if not text:
             await interaction.response.send_message(
-                f"The target roster doesn't exist yet at `{target.relative_to(target.parents[3])}`.",
+                "No roster to download yet. Run `/initialize` or `/recap` first.",
                 ephemeral=True,
             )
             return
         await interaction.response.send_message(
-            f"📥 Current roster from `{target.parent.name}`. Edit and re-run "
-            f"`/roster action:edit file:<your edited file>` to replace it.",
-            file=discord.File(str(target), filename="roster.md"),
+            "📥 Current roster. Edit locally and re-run "
+            "`/roster action:edit file:<your edited file>` to replace it.",
+            file=discord.File(BytesIO(text.encode("utf-8")), filename="roster.md"),
             ephemeral=True,
         )
         return
 
-    # File uploaded — read, decode, replace target.
     raw = await file.read()
     try:
         new_text = raw.decode("utf-8")
@@ -161,10 +139,9 @@ async def _do_edit(
         )
         return
 
-    channel_files.write_text_atomic(target, new_text)
-    rel_path = target.relative_to(target.parents[3])
+    await channel_files.write_roster(interaction.channel_id, new_text)
     await interaction.response.send_message(
-        f"✅ Replaced `{rel_path}` ({len(new_text):,} chars).",
+        f"✅ Replaced the channel roster ({len(new_text):,} chars).",
         ephemeral=True,
     )
 
@@ -174,17 +151,15 @@ async def _do_edit(
 @app_commands.describe(
     action="show (default), delete, or edit",
     file="For action=edit: a roster.md file to replace the current roster with",
-    vod_id="For action=edit: a specific recap's VOD ID (default = latest)",
 )
 async def roster(
     interaction: discord.Interaction,
     action: Optional[Literal["show", "delete", "edit"]] = None,
     file: Optional[discord.Attachment] = None,
-    vod_id: Optional[str] = None,
 ):
     if action == "delete":
         await _do_delete(interaction)
     elif action == "edit":
-        await _do_edit(interaction, file, vod_id)
+        await _do_edit(interaction, file)
     else:
         await _do_show(interaction)
