@@ -9,7 +9,7 @@ from recap_bot.commands._helpers import (
     format_channel_label,
     resolve_category,
 )
-from recap_bot.config import settings
+from recap_bot.config import model_config, settings
 from recap_bot.pipeline import state
 from recap_bot.pipeline.download import detect_source
 from recap_bot.pipeline.initialize import is_initializing
@@ -26,15 +26,18 @@ from recap_bot.storage import files as channel_files
     url="Public Twitch VOD URL or YouTube video URL (max 6h duration)",
     style="Override default journal style (optional)",
     force="Delete cached audio/chunks for this VOD and re-download",
+    profile="Model profile (default = best quality, lite = cheaper). For A/B testing.",
 )
 @app_commands.choices(
-    style=[app_commands.Choice(name=s.title(), value=s) for s in ("chapters", "bullets", "narrative", "structured", "terse")]
+    style=[app_commands.Choice(name=s.title(), value=s) for s in ("chapters", "bullets", "narrative", "structured", "terse")],
+    profile=[app_commands.Choice(name=p, value=p) for p in model_config.profile_names()],
 )
 async def recap(
     interaction: discord.Interaction,
     url: str,
     style: app_commands.Choice[str] = None,
     force: bool = False,
+    profile: app_commands.Choice[str] = None,
 ):
     await interaction.response.defer(ephemeral=True)
 
@@ -96,6 +99,7 @@ async def recap(
     meta = await channel_files.read_meta(category_id) or {}
     await channel_files.write_meta(category_id, guild_id=guild_id or 0)
     style_value = style.value if style else (meta.get("style") or settings.default_style)
+    profile_value = profile.value if profile else "default"
 
     job = state.claim(
         category_id=category_id,
@@ -107,6 +111,7 @@ async def recap(
         style=style_value,
         channel_label=format_channel_label(interaction.channel),
         force=force,
+        profile=profile_value,
     )
     if job is None:
         # Race: another /recap claimed this category between our check and claim
@@ -127,6 +132,8 @@ async def recap(
             f"📜 Queued for **{category_name}**. I'll post the recap in this channel "
             f"when ready and DM you live progress."
         )
+        if profile_value != "default":
+            msg += f" Profile: **{profile_value}**."
         if style:
             msg += f" Style override: **{style.value}**."
         if force:

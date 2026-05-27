@@ -137,27 +137,58 @@ _apply_runtime_overrides()
 
 
 class ModelConfig:
-    """Loads per-action model assignments from models.yaml."""
+    """Loads named model PROFILES from models.yaml.
+
+    Format:
+        profiles:
+          default: {roster_build: ..., transcribe: ..., summarize: ..., ...}
+          lite:    {...}            # e.g. cheaper models for A/B testing
+
+    Back-compat: a top-level `models:` block (the old single-set format) is read
+    as the `default` profile.
+
+    `get(action, profile)` resolves a model name in this order: the named
+    profile's value → the default profile's value → settings.gemini_model. So a
+    profile only needs to list the keys it overrides.
+    """
+
+    DEFAULT_PROFILE = "default"
 
     def __init__(self, path: Path = Path("models.yaml")):
-        self._models: dict[str, str] = {}
+        data: dict = {}
         if path.exists():
             try:
-                data = yaml.safe_load(path.read_text(encoding="utf-8"))
-                self._models = data.get("models", {})
+                data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
             except Exception:
-                pass
-        # Fallbacks for any missing keys
-        default = settings.gemini_model
-        self._models.setdefault("roster_build", default)
-        self._models.setdefault("scratchpad_build", default)
-        self._models.setdefault("transcribe", default)
-        self._models.setdefault("summarize", default)
-        self._models.setdefault("update_roster", default)
-        self._models.setdefault("update_scratchpad", default)
+                logger.exception("Failed to read %s; falling back to default model", path)
+        profiles = data.get("profiles")
+        if not profiles:
+            # Old format: a top-level `models:` map becomes the default profile.
+            profiles = {self.DEFAULT_PROFILE: data.get("models", {}) or {}}
+        self._profiles: dict[str, dict[str, str]] = {
+            str(name): dict(models or {}) for name, models in profiles.items()
+        }
+        self._profiles.setdefault(self.DEFAULT_PROFILE, {})
 
-    def get(self, action: str) -> str:
-        return self._models.get(action, settings.gemini_model)
+    def profile_names(self) -> list[str]:
+        """All profile names, `default` first."""
+        rest = sorted(n for n in self._profiles if n != self.DEFAULT_PROFILE)
+        return [self.DEFAULT_PROFILE] + rest
+
+    def has_profile(self, name: str) -> bool:
+        return name in self._profiles
+
+    def models_for(self, profile: str | None = None) -> dict[str, str]:
+        """The merged model map for `profile` (default values filled in)."""
+        default_map = self._profiles.get(self.DEFAULT_PROFILE, {})
+        prof_map = self._profiles.get(profile or self.DEFAULT_PROFILE, default_map)
+        return {**default_map, **prof_map}
+
+    def get(self, action: str, profile: str | None = None) -> str:
+        name = profile or self.DEFAULT_PROFILE
+        default_map = self._profiles.get(self.DEFAULT_PROFILE, {})
+        prof_map = self._profiles.get(name, default_map)
+        return prof_map.get(action) or default_map.get(action) or settings.gemini_model
 
 
 model_config = ModelConfig()

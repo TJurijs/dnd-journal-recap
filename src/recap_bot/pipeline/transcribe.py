@@ -22,9 +22,9 @@ def _get_client() -> genai.Client:
     return _client
 
 
-async def transcribe_chunk(chunk_path: Path) -> tuple[str, UsageInfo | None]:
+async def transcribe_chunk(chunk_path: Path, profile: str | None = None) -> tuple[str, UsageInfo | None]:
     """Transcribe a single audio chunk. Uploads, polls, generates, deletes."""
-    model = model_config.get("transcribe")
+    model = model_config.get("transcribe", profile)
     logger.info("Using model '%s' for transcribe_chunk", model)
     client = _get_client()
     file = await asyncio.to_thread(client.files.upload, file=str(chunk_path))
@@ -64,6 +64,6 @@ async def transcribe_chunk(chunk_path: Path) -> tuple[str, UsageInfo | None]:
     return transcript, usage
 
 
-async def transcribe_audio(audio_path: Path) -> tuple[str, UsageInfo | None]:
+async def transcribe_audio(audio_path: Path, profile: str | None = None) -> tuple[str, UsageInfo | None]:
     """Transcribe a full audio file (single chunk)."""
-    return await transcribe_chunk(audio_path)
+    return await transcribe_chunk(audio_path, profile)

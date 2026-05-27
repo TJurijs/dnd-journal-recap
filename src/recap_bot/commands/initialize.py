@@ -5,6 +5,7 @@ import discord
 from discord import app_commands
 
 from recap_bot.bot import bot
+from recap_bot.config import model_config
 from recap_bot.commands._helpers import (
     INITIALIZE_REQUIRED_PERMS,
     NOT_IN_CATEGORY_MSG,
@@ -61,9 +62,12 @@ class _ConfirmRebuildView(discord.ui.View):
     description="📜 Recap: Build roster + scratchpad from this channel's existing journals",
 )
 @app_commands.default_permissions(manage_channels=True)
-async def initialize(interaction: discord.Interaction):
+@app_commands.describe(profile="Model profile (default = best quality, lite = cheaper). For A/B testing.")
+@app_commands.choices(profile=[app_commands.Choice(name=p, value=p) for p in model_config.profile_names()])
+async def initialize(interaction: discord.Interaction, profile: app_commands.Choice[str] = None):
     journal_channel_id = interaction.channel_id
     guild_id = interaction.guild_id
+    profile_value = profile.value if profile else "default"
 
     if isinstance(interaction.channel, discord.DMChannel):
         await interaction.response.send_message(
@@ -152,7 +156,7 @@ async def initialize(interaction: discord.Interaction):
         # progress visible and appends the summary, so we don't overwrite it.
         await run_initialization(
             bot, dm_msg, category_id, journal_channel_id, guild_id or 0,
-            channel_label=channel_label,
+            channel_label=channel_label, profile=profile_value,
         )
     except asyncio.CancelledError:
         # run_initialization already rendered the cancellation footer.

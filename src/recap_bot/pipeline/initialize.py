@@ -71,6 +71,7 @@ async def run_initialization(
     guild_id: int,
     *,
     channel_label: str = "",
+    profile: str | None = None,
 ) -> InitResult:
     """Build the CATEGORY's roster + scratchpad from the journal channel's
     history. Reads journals from `journal_channel_id` (the channel /initialize
@@ -146,7 +147,7 @@ async def run_initialization(
         else:
             icon = "⬜"
             extra = "pending"
-        return f"{icon} {label} ({model_config.get(model_key)}): {extra}"
+        return f"{icon} {label} ({model_config.get(model_key, profile)}): {extra}"
 
     async def _render(footer: str = ""):
         text = (
@@ -189,38 +190,38 @@ async def run_initialization(
     async def _build_roster():
         start = time.monotonic()
         try:
-            text, usage = await build_roster_from_journals(journals_md)
+            text, usage = await build_roster_from_journals(journals_md, profile=profile)
             progress_state["roster"]["status"] = "done"
             progress_state["roster"]["elapsed"] = time.monotonic() - start
             if usage:
                 progress_state["roster"]["cost"] = progress_state["roster"]["cost"] + usage
-            step_log.step("roster_build", model=model_config.get("roster_build"),
+            step_log.step("roster_build", model=model_config.get("roster_build", profile),
                           progress="done", usage=usage, note=f"{len(text)} chars")
             return text
         except Exception:
             logger.exception("Roster build failed")
             progress_state["roster"]["status"] = "failed"
             progress_state["roster"]["elapsed"] = time.monotonic() - start
-            step_log.step("roster_build", model=model_config.get("roster_build"),
+            step_log.step("roster_build", model=model_config.get("roster_build", profile),
                           progress="failed")
             return ""
 
     async def _build_scratchpad():
         start = time.monotonic()
         try:
-            text, usage = await build_scratchpad_from_journals(journals_md)
+            text, usage = await build_scratchpad_from_journals(journals_md, profile=profile)
             progress_state["scratchpad"]["status"] = "done"
             progress_state["scratchpad"]["elapsed"] = time.monotonic() - start
             if usage:
                 progress_state["scratchpad"]["cost"] = progress_state["scratchpad"]["cost"] + usage
-            step_log.step("scratchpad_build", model=model_config.get("scratchpad_build"),
+            step_log.step("scratchpad_build", model=model_config.get("scratchpad_build", profile),
                           progress="done", usage=usage, note=f"{len(text)} chars")
             return text
         except Exception:
             logger.exception("Scratchpad build failed")
             progress_state["scratchpad"]["status"] = "failed"
             progress_state["scratchpad"]["elapsed"] = time.monotonic() - start
-            step_log.step("scratchpad_build", model=model_config.get("scratchpad_build"),
+            step_log.step("scratchpad_build", model=model_config.get("scratchpad_build", profile),
                           progress="failed")
             return ""
 

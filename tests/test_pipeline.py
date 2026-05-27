@@ -250,6 +250,44 @@ def test_cost_is_model_aware_and_totals_correctly(monkeypatch):
     assert abs(t.total_cost_usd - 12.5) < 1e-9
 
 
+# ----- model profiles (models.yaml) -----
+
+def test_model_config_profiles(tmp_path):
+    from recap_bot.config import ModelConfig
+    p = tmp_path / "models.yaml"
+    p.write_text(
+        "profiles:\n"
+        "  default:\n    summarize: pro\n    transcribe: flash-lite\n"
+        "  lite:\n    summarize: flash\n",
+        encoding="utf-8",
+    )
+    mc = ModelConfig(path=p)
+    assert mc.profile_names()[0] == "default"          # default always first
+    assert "lite" in mc.profile_names()
+    assert mc.get("summarize") == "pro"                # default profile
+    assert mc.get("summarize", "lite") == "flash"      # lite overrides
+    assert mc.get("transcribe", "lite") == "flash-lite"  # missing key → default profile
+    assert mc.has_profile("lite")
+    assert not mc.has_profile("nope")
+
+
+def test_model_config_unknown_profile_falls_back_to_default(tmp_path):
+    from recap_bot.config import ModelConfig
+    p = tmp_path / "models.yaml"
+    p.write_text("profiles:\n  default:\n    summarize: pro\n", encoding="utf-8")
+    mc = ModelConfig(path=p)
+    assert mc.get("summarize", "does-not-exist") == "pro"
+
+
+def test_model_config_backcompat_old_models_block(tmp_path):
+    from recap_bot.config import ModelConfig
+    p = tmp_path / "models.yaml"
+    p.write_text("models:\n  summarize: oldpro\n", encoding="utf-8")
+    mc = ModelConfig(path=p)
+    assert mc.profile_names() == ["default"]
+    assert mc.get("summarize") == "oldpro"  # old top-level `models:` → default profile
+
+
 # ----- transient-error retry (llm.generate_content) -----
 
 class _FakeGenAIClient:

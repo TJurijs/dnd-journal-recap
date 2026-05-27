@@ -256,6 +256,7 @@ async def run_job(bot, category_id: int) -> None:
 
     user_id = job.requested_by
     style = job.style
+    profile = job.profile  # which models.yaml profile this job uses
 
     # Probe VOD title and duration
     vod_duration = 0
@@ -404,7 +405,7 @@ async def run_job(bot, category_id: int) -> None:
         _check_cancelled(category_id)
 
         # --- Step 5: Transcribe (parallel with semaphore) ---
-        transcribe_model = model_config.get("transcribe")
+        transcribe_model = model_config.get("transcribe", profile)
         _mark_ui(category_id, "transcribe", "current", tool=transcribe_model)
         await _send_status(bot, user_id, category_id, total_cost=cost_tracker.format_total())
 
@@ -417,7 +418,7 @@ async def run_job(bot, category_id: int) -> None:
 
         async def _bounded_transcribe(idx: int, chunk_path: Path):
             async with semaphore:
-                part, usage = await transcribe_chunk(chunk_path)
+                part, usage = await transcribe_chunk(chunk_path, profile)
                 return idx, part, usage
 
         tasks = [asyncio.create_task(_bounded_transcribe(i, cp)) for i, cp in enumerate(chunk_paths)]
@@ -449,10 +450,10 @@ async def run_job(bot, category_id: int) -> None:
         _check_cancelled(category_id)
 
         # --- Step 6: Summarize ---
-        summarize_model = model_config.get("summarize")
+        summarize_model = model_config.get("summarize", profile)
         _mark_ui(category_id, "summarize", "current", tool=summarize_model)
         await _send_status(bot, user_id, category_id, total_cost=cost_tracker.format_total())
-        journal_md, usage = await summarize_session(category_id, transcript, style=style)
+        journal_md, usage = await summarize_session(category_id, transcript, style=style, profile=profile)
         # Prepend the VOD title so the journal is self-identifying (visible in the file,
         # the Discord attachment, and any future re-use of the journal text).
         if job.title:
@@ -463,14 +464,14 @@ async def run_job(bot, category_id: int) -> None:
         _check_cancelled(category_id)
 
         # --- Step 7: Update roster & scratchpad (parallel) ---
-        roster_model = model_config.get("update_roster")
-        scratch_model = model_config.get("update_scratchpad")
+        roster_model = model_config.get("update_roster", profile)
+        scratch_model = model_config.get("update_scratchpad", profile)
         _mark_ui(category_id, "update_roster", "current", tool=roster_model)
         _mark_ui(category_id, "update_scratchpad", "current", tool=scratch_model)
         await _send_status(bot, user_id, category_id, total_cost=cost_tracker.format_total())
         (new_roster, roster_usage), (new_scratchpad, scratch_usage) = await asyncio.gather(
-            update_roster(roster_text, journal_md),
-            update_scratchpad(scratchpad_text, journal_md),
+            update_roster(roster_text, journal_md, profile),
+            update_scratchpad(scratchpad_text, journal_md, profile),
         )
         _mark_ui(
             category_id, "update_roster", "done",

@@ -32,6 +32,7 @@ class ActiveJob:
     title: str = ""                    # VOD title, for status display
     channel_label: str = ""            # "Category / channel-name" of the post channel
     force: bool = False                # wipe cached audio/chunks before running
+    profile: str = "default"           # models.yaml profile this job uses
 
 
 _active: dict[int, ActiveJob] = {}   # keyed by category_id
@@ -48,6 +49,7 @@ def claim(
     style: str,
     channel_label: str = "",
     force: bool = False,
+    profile: str = "default",
 ) -> Optional[ActiveJob]:
     """Atomically reserve the CATEGORY for a new job. Returns None if a job
     already exists for this category."""
@@ -63,6 +65,7 @@ def claim(
         style=style,
         channel_label=channel_label,
         force=force,
+        profile=profile,
     )
     _active[category_id] = job
     return job

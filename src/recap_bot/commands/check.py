@@ -133,7 +133,11 @@ def _models_summary() -> str:
         "roster_build", "scratchpad_build",
         "update_roster", "update_scratchpad",
     ]
-    return "\n".join(f"  • {k}: `{model_config.get(k)}`" for k in keys)
+    lines: list[str] = []
+    for prof in model_config.profile_names():
+        lines.append(f"  **{prof}**:")
+        lines.extend(f"    • {k}: `{model_config.get(k, prof)}`" for k in keys)
+    return "\n".join(lines)
 
 
 @app_commands.allowed_contexts(guilds=False, dms=True, private_channels=False)

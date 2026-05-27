@@ -48,7 +48,7 @@ def _concat_journals(journals_md: list[str]) -> str:
 
 # ----- Full-history builds (used by /initialize) ----------------------------
 
-async def build_roster_from_journals(journals_md: list[str], progress_cb=None) -> tuple[str, UsageInfo | None]:
+async def build_roster_from_journals(journals_md: list[str], progress_cb=None, profile: str | None = None) -> tuple[str, UsageInfo | None]:
     """Build a canonical roster from ALL journals in a single LLM call.
 
     `progress_cb` (if given) is called with (0, total, None) at the start and
@@ -58,7 +58,7 @@ async def build_roster_from_journals(journals_md: list[str], progress_cb=None) -
     if not journals_md:
         return "", None
 
-    model = model_config.get("roster_build")
+    model = model_config.get("roster_build", profile)
     total = len(journals_md)
 
     if progress_cb:
@@ -109,7 +109,7 @@ Journals:
     return roster, usage
 
 
-async def build_scratchpad_from_journals(journals_md: list[str], progress_cb=None) -> tuple[str, UsageInfo | None]:
+async def build_scratchpad_from_journals(journals_md: list[str], progress_cb=None, profile: str | None = None) -> tuple[str, UsageInfo | None]:
     """Build a canonical scratchpad from ALL journal records in a single LLM call.
 
     One line per journal record (these are NOT 1:1 with sessions — some sessions
@@ -118,7 +118,7 @@ async def build_scratchpad_from_journals(journals_md: list[str], progress_cb=Non
     if not journals_md:
         return "", None
 
-    model = model_config.get("scratchpad_build")
+    model = model_config.get("scratchpad_build", profile)
     total = len(journals_md)
 
     if progress_cb:
@@ -157,9 +157,9 @@ Journal records:
 
 # ----- Incremental updates (used by /recap) --------------------------------
 
-async def update_scratchpad(existing_scratchpad: str, new_journal: str) -> tuple[str, UsageInfo | None]:
+async def update_scratchpad(existing_scratchpad: str, new_journal: str, profile: str | None = None) -> tuple[str, UsageInfo | None]:
     """Append a new entry to the scratchpad from this recap. Returns (text, usage)."""
-    model = model_config.get("update_scratchpad")
+    model = model_config.get("update_scratchpad", profile)
     prompt = f"""Given the existing campaign scratchpad and a new recap journal, add ONE new entry to the end.
 
 Important: scratchpad entries are *journal records*, not game sessions. Don't call this entry a "session" or give it a session number. Use the next "Entry N" number that continues the existing sequence (e.g. if the last entry is "Entry 117", this one is "Entry 118"). If the existing scratchpad uses a different format, match it.
@@ -186,9 +186,9 @@ Return ONLY the updated scratchpad with the new entry appended."""
     return (text.strip() or existing_scratchpad), usage
 
 
-async def update_roster(existing_roster: str, new_journal: str) -> tuple[str, UsageInfo | None]:
+async def update_roster(existing_roster: str, new_journal: str, profile: str | None = None) -> tuple[str, UsageInfo | None]:
     """Incrementally update roster from a single new journal entry. Returns (text, usage)."""
-    model = model_config.get("update_roster")
+    model = model_config.get("update_roster", profile)
     prompt = f"""You are updating a campaign roster with information from a new session journal. The roster is a PERMANENT campaign log.
 
 CRITICAL RULES:
