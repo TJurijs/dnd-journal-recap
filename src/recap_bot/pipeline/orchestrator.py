@@ -107,6 +107,8 @@ def _build_status_text(category_id: int, total_cost: str = "", header: str = "")
     lines.append(f"**{title}**")
     if job and job.channel_label:
         lines.append(f"_Source: {job.channel_label}_")
+    if job:
+        lines.append(f"_Profile: {job.profile}_")
     lines.append("")
     for key, label in STEPS:
         entry = _step_ui.get(category_id, {}).get(key, {"status": "pending", "note": "", "pct": 0, "tool": "", "cost": UsageInfo()})

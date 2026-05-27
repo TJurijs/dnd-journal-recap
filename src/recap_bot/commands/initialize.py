@@ -62,7 +62,7 @@ class _ConfirmRebuildView(discord.ui.View):
     description="📜 Recap: Build roster + scratchpad from this channel's existing journals",
 )
 @app_commands.default_permissions(manage_channels=True)
-@app_commands.describe(profile="Model profile (default = best quality, lite = cheaper). For A/B testing.")
+@app_commands.describe(profile="Model profile (default = cheaper/faster, high = best quality). For A/B testing.")
 @app_commands.choices(profile=[app_commands.Choice(name=p, value=p) for p in model_config.profile_names()])
 async def initialize(interaction: discord.Interaction, profile: app_commands.Choice[str] = None):
     journal_channel_id = interaction.channel_id

@@ -1,7 +1,7 @@
 # Per-action model assignments, grouped into named PROFILES.
 #
 # /recap and /initialize use the `default` profile unless you pass an optional
-# `profile:` parameter (e.g. profile:lite) — handy for A/B testing cost vs
+# `profile:` parameter (e.g. profile:high) — handy for A/B testing cost vs
 # quality. A profile only needs to list the keys it overrides; anything missing
 # falls back to `default`, then to GEMINI_MODEL.
 #
@@ -9,22 +9,22 @@
 # "💰 Total API cost" stays accurate (otherwise it falls back to a default rate).
 
 profiles:
-  # Best quality. Pro for the heavy lifting (summarize + full-history builds).
+  # Everyday default — cheaper. Flash everywhere + the cheaper flash-lite for
+  # transcription. Roughly half the per-recap cost of `high`.
   default:
-    roster_build: gemini-3.1-pro-preview
-    scratchpad_build: gemini-3.1-pro-preview
-    transcribe: gemini-3.1-flash-lite
-    summarize: gemini-3.1-pro-preview
-    update_roster: gemini-3-flash-preview
-    update_scratchpad: gemini-3-flash-preview
-
-  # Cheaper. Flash everywhere + the older/cheaper flash-lite for transcription.
-  # Roughly a third of `default`'s per-recap cost; trade-off is prose/structure
-  # quality, especially on chaotic multi-speaker audio.
-  lite:
     roster_build: gemini-3-flash-preview
     scratchpad_build: gemini-3-flash-preview
     transcribe: gemini-2.5-flash-lite
     summarize: gemini-3-flash-preview
+    update_roster: gemini-3-flash-preview
+    update_scratchpad: gemini-3-flash-preview
+
+  # Best quality — Pro for the heavy lifting (summarize + full-history builds)
+  # and the newer flash-lite for transcription. Pass profile:high to use it.
+  high:
+    roster_build: gemini-3.1-pro-preview
+    scratchpad_build: gemini-3.1-pro-preview
+    transcribe: gemini-3.1-flash-lite
+    summarize: gemini-3.1-pro-preview
     update_roster: gemini-3-flash-preview
     update_scratchpad: gemini-3-flash-preview

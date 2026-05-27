@@ -26,7 +26,7 @@ from recap_bot.storage import files as channel_files
     url="Public Twitch VOD URL or YouTube video URL (max 6h duration)",
     style="Override default journal style (optional)",
     force="Delete cached audio/chunks for this VOD and re-download",
-    profile="Model profile (default = best quality, lite = cheaper). For A/B testing.",
+    profile="Model profile (default = cheaper/faster, high = best quality). For A/B testing.",
 )
 @app_commands.choices(
     style=[app_commands.Choice(name=s.title(), value=s) for s in ("chapters", "bullets", "narrative", "structured", "terse")],
