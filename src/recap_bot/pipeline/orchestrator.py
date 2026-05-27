@@ -27,7 +27,10 @@ from recap_bot.pipeline.initialize import is_initializing
 from recap_bot.pipeline.step_log import StepLog
 from recap_bot.pipeline.summarize import summarize_session
 from recap_bot.pipeline.transcribe import transcribe_chunk
-from recap_bot.storage import discord_journals, files as channel_files, usage
+from recap_bot.storage import discord_journals, files as channel_files
+# Aliased: `usage` is used as a local UsageInfo variable inside run_job, which
+# would shadow the module import and break usage_log.log_event() in the finally.
+from recap_bot.storage import usage as usage_log
 
 logger = logging.getLogger(__name__)
 
@@ -569,7 +572,7 @@ async def run_job(bot, category_id: int) -> None:
         try:
             guild = bot.get_guild(job.guild_id) if job.guild_id else None
             user = bot.get_user(job.requested_by)
-            usage.log_event(
+            usage_log.log_event(
                 event="recap",
                 status=job.status,
                 guild_id=job.guild_id,
