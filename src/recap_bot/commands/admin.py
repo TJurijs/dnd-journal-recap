@@ -155,8 +155,10 @@ def _fmt_event(e: dict) -> str:
     cmd = e.get("event") or "?"
     user = e.get("user_name") or e.get("user_id") or "?"
     profile = e.get("profile") or "?"
-    cost = e.get("cost_usd", 0.0) or 0.0
-    return f"{icon} `{ts}` · **{guild}** · {loc} · /{cmd} · {user} · `{profile}` · **${cost:.4f}**"
+    cost = e.get("cost_usd")
+    cost_str = f"${cost:.4f}" if isinstance(cost, (int, float)) else "$—"
+    bf = " _(backfill)_" if e.get("backfilled") else ""
+    return f"{icon} `{ts}` · **{guild}** · {loc} · /{cmd} · {user} · `{profile}` · **{cost_str}**{bf}"
 
 
 @admin_group.command(name="log", description="Recent usage: when, server, channel, command, user, cost")
@@ -172,8 +174,8 @@ async def admin_log(interaction: discord.Interaction, limit: int = 15):
             ephemeral=True,
         )
         return
-    total = sum((e.get("cost_usd", 0.0) or 0.0) for e in events)
-    lines = [f"📊 **Last {len(events)} event(s)** — shown total **${total:.4f}**", ""]
+    total = sum(e["cost_usd"] for e in events if isinstance(e.get("cost_usd"), (int, float)))
+    lines = [f"📊 **Last {len(events)} event(s)** — known-cost total **${total:.4f}**", ""]
     lines += [_fmt_event(e) for e in events]
     text = "\n".join(lines)
     if len(text) <= 1990:
