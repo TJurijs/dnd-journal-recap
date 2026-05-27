@@ -368,64 +368,40 @@ def test_guild_ids_ignores_garbage_parts():
     assert s.guild_ids == [111, 222]
 
 
-# ----- /settings helpers -----
+# ----- /admin helpers -----
 
-def test_settings_mask_short():
-    from recap_bot.commands.settings import _mask
+def test_admin_mask():
+    from recap_bot.commands.admin import _mask
     assert _mask("") == "(unset)"
     assert _mask("short") == "*****"
-    assert _mask("abcdefgh") == "********"  # exactly 8 → full mask
-
-
-def test_settings_mask_long():
-    from recap_bot.commands.settings import _mask
+    assert _mask("abcdefgh") == "********"          # exactly 8 → full mask
     assert _mask("AIzaSyABC1234567890DEF") == "AIza…0DEF"
 
 
-def test_write_override_roundtrip(isolated_data_dir, monkeypatch):
-    from recap_bot.commands.settings import _write_override
-    from recap_bot import config
+# ----- usage log (/admin log) -----
 
-    # _write_override uses runtime_config_path() which uses settings.data_dir;
-    # the isolated_data_dir fixture already patches that.
-    _write_override("gemini_api_key", "new-test-key")
-    _write_override("gemini_model", "gemini-3.1-pro-preview")
+def test_usage_log_round_trip(isolated_data_dir):
+    from recap_bot.storage import usage
+    assert usage.read_recent() == []
+    assert usage.event_count() == 0
 
-    path = config.runtime_config_path()
-    assert path.exists()
+    usage.log_event(event="recap", status="done", guild_name="G1", location="Cat / log",
+                    user_name="alice", profile="default", cost_usd=0.17)
+    usage.log_event(event="initialize", status="failed", guild_name="G2", location="Cat2 / journal",
+                    user_name="bob", profile="high", cost_usd=0.0)
 
-    import yaml
-    saved = yaml.safe_load(path.read_text())
-    assert saved == {"gemini_api_key": "new-test-key", "gemini_model": "gemini-3.1-pro-preview"}
-
-
-def test_write_override_rejects_non_overridable(isolated_data_dir):
-    from recap_bot.commands.settings import _write_override
-    import pytest
-    with pytest.raises(ValueError):
-        _write_override("discord_bot_token", "secret")  # not in RUNTIME_OVERRIDABLE
+    events = usage.read_recent()
+    assert len(events) == 2
+    assert events[0]["event"] == "initialize"   # newest first
+    assert events[1]["event"] == "recap"
+    assert events[1]["cost_usd"] == 0.17
+    assert events[1]["user_name"] == "alice"
+    assert usage.event_count() == 2
 
 
-def test_discord_guild_id_is_runtime_overridable(isolated_data_dir):
-    """The /settings add_guild / remove_guild flow writes discord_guild_id, so
-    it must be in RUNTIME_OVERRIDABLE (otherwise _write_override rejects it)."""
-    from recap_bot.commands.settings import _write_override
-    from recap_bot import config
-
-    _write_override("discord_guild_id", "111,222")
-    import yaml
-    saved = yaml.safe_load(config.runtime_config_path().read_text())
-    assert saved["discord_guild_id"] == "111,222"
-
-
-@pytest.mark.parametrize("raw,expected", [
-    ("1505296799982682262", 1505296799982682262),
-    ("  123  ", 123),
-    ("notanumber", None),
-    ("", None),
-    ("-5", None),         # isdigit() rejects the minus sign
-    ("12.5", None),
-])
-def test_parse_guild_id(raw, expected):
-    from recap_bot.commands.settings import _parse_guild_id
-    assert _parse_guild_id(raw) == expected
+def test_usage_read_recent_limit(isolated_data_dir):
+    from recap_bot.storage import usage
+    for i in range(5):
+        usage.log_event(event="recap", status="done", cost_usd=float(i))
+    recent = usage.read_recent(limit=2)
+    assert [e["cost_usd"] for e in recent] == [4.0, 3.0]   # newest first, capped at 2

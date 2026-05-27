@@ -27,7 +27,7 @@ from recap_bot.pipeline.initialize import is_initializing
 from recap_bot.pipeline.step_log import StepLog
 from recap_bot.pipeline.summarize import summarize_session
 from recap_bot.pipeline.transcribe import transcribe_chunk
-from recap_bot.storage import discord_journals, files as channel_files
+from recap_bot.storage import discord_journals, files as channel_files, usage
 
 logger = logging.getLogger(__name__)
 
@@ -555,6 +555,25 @@ async def run_job(bot, category_id: int) -> None:
         _step_ui.pop(category_id, None)
         _last_status_edit.pop(category_id, None)
         _last_status_fingerprint.pop(category_id, None)
+        # Usage log (best-effort) — record what this recap cost, for /admin log.
+        try:
+            guild = bot.get_guild(job.guild_id) if job.guild_id else None
+            user = bot.get_user(job.requested_by)
+            usage.log_event(
+                event="recap",
+                status=job.status,
+                guild_id=job.guild_id,
+                guild_name=guild.name if guild else "",
+                category_id=job.category_id,
+                location=job.channel_label,
+                user_id=job.requested_by,
+                user_name=str(user) if user else "",
+                profile=job.profile,
+                vod_id=job.vod_id,
+                cost_usd=cost_tracker.total_cost_usd,
+            )
+        except Exception:
+            logger.exception("Failed to log recap usage event")
         # recap_dir is PERSISTENT (audit + cache); nothing to clean up here.
         # Release the channel slot so the next /recap can run.
         state.release(category_id)

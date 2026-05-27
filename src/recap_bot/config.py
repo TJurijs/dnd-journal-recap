@@ -8,24 +8,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 logger = logging.getLogger(__name__)
 
 
-RUNTIME_CONFIG_FILENAME = "runtime_config.yaml"
-# Fields that can be overridden at runtime via /settings or by editing
-# data/runtime_config.yaml directly. Anything not in this list is ignored
-# even if present in the file.
-RUNTIME_OVERRIDABLE = frozenset({
-    "gemini_api_key",
-    "gemini_model",
-    "log_level",
-    "max_vod_hours",
-    "default_style",
-    "download_rate_limit",
-    "ffmpeg_bin",
-    # Comma-separated guild id list. Overridable so the owner can add/remove
-    # servers from a Discord DM via /settings without SSHing to edit .env.
-    "discord_guild_id",
-})
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -71,7 +53,7 @@ class Settings(BaseSettings):
           - comma-separated: "12345, 67890, 11111"
 
         Each id gets channel commands synced instantly. DM-only commands
-        (`/jobs`, `/check`, `/settings`) are always global regardless — they
+        (`/jobs`, `/check`, `/admin`) are always global regardless — they
         need to be global to appear in DM autocomplete.
 
         Multi-guild support keeps the fast-iteration workflow that single-guild
@@ -93,47 +75,9 @@ class Settings(BaseSettings):
         return out
 
 
+# Settings come from .env (and the environment) only. Edit config on the
+# server directly, then `/admin restart` to apply.
 settings = Settings()
-
-
-def runtime_config_path() -> Path:
-    """Where `/settings set ...` writes runtime overrides."""
-    return settings.data_dir / RUNTIME_CONFIG_FILENAME
-
-
-def _apply_runtime_overrides() -> None:
-    """Layer `runtime_config.yaml` on top of `.env`-derived settings.
-
-    Anything in RUNTIME_OVERRIDABLE that's present in the file wins over
-    the env-var value. Bad/missing values are ignored silently (env value
-    stays). Called once at process startup; container restart picks up
-    changes written by `/settings`.
-    """
-    path = runtime_config_path()
-    if not path.exists():
-        return
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        logger.exception("Failed to read %s; runtime overrides ignored", path)
-        return
-    if not isinstance(data, dict):
-        return
-
-    applied: list[str] = []
-    for key, value in data.items():
-        if key not in RUNTIME_OVERRIDABLE or value is None:
-            continue
-        try:
-            setattr(settings, key, value)
-            applied.append(key)
-        except Exception:
-            logger.exception("Failed to apply runtime override %s", key)
-    if applied:
-        logger.info("Applied runtime overrides from %s: %s", path, applied)
-
-
-_apply_runtime_overrides()
 
 
 class ModelConfig:

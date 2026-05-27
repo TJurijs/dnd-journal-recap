@@ -56,11 +56,12 @@ def _check_init_cancelled(category_id: int) -> None:
 
 
 class InitResult:
-    def __init__(self, roster_chars: int, scratchpad_chars: int, journal_count: int, cost: str):
+    def __init__(self, roster_chars: int, scratchpad_chars: int, journal_count: int, cost: str, cost_usd: float = 0.0):
         self.roster_chars = roster_chars
         self.scratchpad_chars = scratchpad_chars
         self.journal_count = journal_count
-        self.cost = cost
+        self.cost = cost          # formatted string, e.g. "~$0.22"
+        self.cost_usd = cost_usd  # numeric, for usage logging
 
 
 async def run_initialization(
@@ -105,7 +106,7 @@ async def run_initialization(
             await progress_msg.edit(content=f"{header}📭 No prior journals found.\n\n✅ Job completed")
         except Exception:
             logger.exception("Failed to edit init progress message")
-        return InitResult(0, 0, 0, cost.format_total())
+        return InitResult(0, 0, 0, cost.format_total(), cost.total_cost_usd)
 
     # Fetch journal bodies (cached on disk)
     await progress_msg.edit(content=f"{header}📥 Fetching {len(entries)} journal(s) from channel history...")
@@ -259,4 +260,5 @@ async def run_initialization(
         scratchpad_chars=len(scratchpad_text),
         journal_count=len(journals_md),
         cost=cost.format_total(),
+        cost_usd=cost.total_cost_usd,
     )

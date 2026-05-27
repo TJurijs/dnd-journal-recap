@@ -19,7 +19,7 @@ from recap_bot.pipeline.initialize import (
     is_initializing,
     run_initialization,
 )
-from recap_bot.storage import files as channel_files
+from recap_bot.storage import files as channel_files, usage
 
 logger = logging.getLogger(__name__)
 
@@ -151,18 +151,38 @@ async def initialize(interaction: discord.Interaction, profile: app_commands.Cho
         return
 
     _initializing_channels.add(category_id)
+    init_status = "done"
+    init_cost = 0.0
     try:
         # run_initialization owns the final render — it keeps all per-step
         # progress visible and appends the summary, so we don't overwrite it.
-        await run_initialization(
+        result = await run_initialization(
             bot, dm_msg, category_id, journal_channel_id, guild_id or 0,
             channel_label=channel_label, profile=profile_value,
         )
+        init_cost = result.cost_usd
     except asyncio.CancelledError:
         # run_initialization already rendered the cancellation footer.
+        init_status = "cancelled"
         logger.info("Initialization cancelled for category %s", category_id)
     except Exception as exc:
+        init_status = "failed"
         logger.exception("Initialization failed for category %s", category_id)
         await dm_msg.edit(content=f"❌ Initialization failed for **{channel_label}**:\n{str(exc)[:1500]}")
     finally:
         _initializing_channels.discard(category_id)
+        try:
+            usage.log_event(
+                event="initialize",
+                status=init_status,
+                guild_id=interaction.guild_id,
+                guild_name=interaction.guild.name if interaction.guild else "",
+                category_id=category_id,
+                location=channel_label,
+                user_id=interaction.user.id,
+                user_name=str(interaction.user),
+                profile=profile_value,
+                cost_usd=init_cost,
+            )
+        except Exception:
+            logger.exception("Failed to log initialize usage event")
