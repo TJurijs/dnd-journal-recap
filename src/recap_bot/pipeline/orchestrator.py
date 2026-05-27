@@ -495,28 +495,38 @@ async def run_job(bot, category_id: int) -> None:
         await channel_files.write_roster(category_id, new_roster)
         await channel_files.write_scratchpad(category_id, new_scratchpad)
 
-        # --- Step 8: Post journal to Discord ---
-        # Post to the channel /recap was invoked in (job.channel_id), which may
-        # differ from the journal channel — recap output and journals can live
-        # in different channels of the same category.
+        # --- Step 8: Deliver the journal ---
         _mark_ui(category_id, "post", "current", tool="discord")
         await _send_status(bot, user_id, category_id, total_cost=cost_tracker.format_total())
         in_game_date = _extract_ingame_date(journal_md) or datetime.utcnow().strftime("%Y-%m-%d")
-        posted_msg_id = await discord_journals.post_journal(
-            bot, job.channel_id, journal_md,
-            vod_id=vod_id, title=job.title, date=in_game_date,
-        )
-        # Remember the message id so /recap_edit can edit this post in-place
-        # later (swap the attachment) instead of leaving the visible post
-        # stale relative to journal.md on disk.
-        try:
-            channel_files.write_recap_message_id(recap_dir, posted_msg_id)
-        except Exception:
-            logger.exception(
-                "Failed to persist discord_msg_id for category %s vod %s",
-                category_id, vod_id,
+        if job.silent:
+            # Silent: DM the journal privately to the requester instead of
+            # posting in the channel. (A real ephemeral post is impossible — the
+            # /recap interaction token expired long before the pipeline finished.)
+            await discord_journals.dm_journal(
+                bot, job.requested_by, journal_md,
+                vod_id=vod_id, title=job.title, date=in_game_date,
             )
-        _mark_ui(category_id, "post", "done", note=f"VOD {vod_id}", tool="discord")
+            _mark_ui(category_id, "post", "done", note=f"VOD {vod_id} (silent → DM)", tool="dm")
+        else:
+            # Post to the channel /recap was invoked in (job.channel_id), which
+            # may differ from the journal channel — recap output and journals
+            # can live in different channels of the same category.
+            posted_msg_id = await discord_journals.post_journal(
+                bot, job.channel_id, journal_md,
+                vod_id=vod_id, title=job.title, date=in_game_date,
+            )
+            # Remember the message id so /recap_edit can edit this post in-place
+            # later (swap the attachment) instead of leaving the visible post
+            # stale relative to journal.md on disk.
+            try:
+                channel_files.write_recap_message_id(recap_dir, posted_msg_id)
+            except Exception:
+                logger.exception(
+                    "Failed to persist discord_msg_id for category %s vod %s",
+                    category_id, vod_id,
+                )
+            _mark_ui(category_id, "post", "done", note=f"VOD {vod_id}", tool="discord")
         step_log.step("post", tool="discord", progress="done", note=f"VOD {vod_id}")
 
         job.status = "done"
@@ -594,7 +604,12 @@ async def _finish_status(
     title = (job.title if job else "") or f"Recap (channel {category_id})"
     try:
         if success:
-            header = f"✅ **{title} complete!**\nCheck the channel for the journal."
+            where = (
+                "Journal DM'd to you above (silent — not posted in the channel)."
+                if (job and job.silent)
+                else "Check the channel for the journal."
+            )
+            header = f"✅ **{title} complete!**\n{where}"
         else:
             header = f"❌ **{title} failed:**\n{error[:1000]}"
         text = _build_status_text(category_id, total_cost=total_cost, header=header)
@@ -609,11 +624,11 @@ async def _finish_status(
         try:
             user = bot.get_user(user_id) or await bot.fetch_user(user_id)
             if user:
-                content = (
-                    f"✅ {title} complete! Check the channel for the journal."
-                    if success
-                    else f"❌ {title} failed: {error[:1000]}"
-                )
+                if success:
+                    _where = "DM'd above (silent)" if (job and job.silent) else "in the channel"
+                    content = f"✅ {title} complete! Journal {_where}."
+                else:
+                    content = f"❌ {title} failed: {error[:1000]}"
                 if total_cost:
                     content += f"\n💰 Total API cost: {total_cost}"
                 if changes and success:

@@ -193,6 +193,35 @@ async def post_journal(
     return msg.id
 
 
+async def dm_journal(
+    bot: discord.Client,
+    user_id: int,
+    journal_md: str,
+    *,
+    vod_id: str,
+    title: str,
+    date: str,
+) -> None:
+    """DM the journal .md privately to a user (for a `silent` recap).
+
+    No channel post, no Edit button (the /recap_edit flow operates on channel
+    messages, not DMs). Raises if the user can't be resolved or DMs are closed.
+    """
+    from io import BytesIO
+
+    user = bot.get_user(user_id) or await bot.fetch_user(user_id)
+    if user is None:
+        raise RuntimeError(f"Could not resolve user {user_id} to DM the silent recap")
+
+    safe_date = re.sub(r"[^\w\-]", "_", date)
+    safe_vod = re.sub(r"[^\w\-]", "_", vod_id)
+    filename = f"recap-{safe_date}-vod{safe_vod}.md"
+
+    header = format_header(title)
+    file = discord.File(BytesIO(journal_md.encode("utf-8")), filename=filename)
+    await user.send(content=f"🤫 **Silent recap** (not posted in the channel):\n{header}", file=file)
+
+
 async def edit_journal_message(
     bot: discord.Client,
     channel_id: int,

@@ -339,6 +339,19 @@ def test_cancel_nonexistent_returns_false():
     assert state.cancel(9999) is False
 
 
+def test_claim_stores_profile_and_silent():
+    job = state.claim(
+        category_id=7, channel_id=70, guild_id=1, requested_by=2,
+        source_type="twitch", source_ref="https://twitch.tv/videos/1", style="chapters",
+        profile="high", silent=True,
+    )
+    assert job is not None
+    assert job.profile == "high"
+    assert job.silent is True
+    assert job.channel_id == 70  # post target preserved
+    state.release(7)
+
+
 # ----- multi-guild DISCORD_GUILD_ID parsing -----
 
 def test_guild_ids_empty():

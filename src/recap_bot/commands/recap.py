@@ -27,6 +27,7 @@ from recap_bot.storage import files as channel_files
     style="Override default journal style (optional)",
     force="Delete cached audio/chunks for this VOD and re-download",
     profile="Model profile (default = cheaper/faster, high = best quality). For A/B testing.",
+    silent="DM the finished recap privately to you instead of posting it in the channel",
 )
 @app_commands.choices(
     style=[app_commands.Choice(name=s.title(), value=s) for s in ("chapters", "bullets", "narrative", "structured", "terse")],
@@ -38,6 +39,7 @@ async def recap(
     style: app_commands.Choice[str] = None,
     force: bool = False,
     profile: app_commands.Choice[str] = None,
+    silent: bool = False,
 ):
     await interaction.response.defer(ephemeral=True)
 
@@ -61,17 +63,21 @@ async def recap(
     # Permission preflight on the POST channel (where this recap will be posted).
     # The pipeline is expensive (download + transcribe + summarize, all billable)
     # and only posts at the very end — bail for free if we can't post here.
-    missing = bot_missing_channel_perms(interaction, RECAP_REQUIRED_PERMS)
-    if missing:
-        await interaction.followup.send(
-            f"🔒 I can't run a recap in this channel — I'm missing: "
-            f"**{', '.join(missing)}**.\n"
-            f"Ask a server admin to grant these to me (or my role) in this "
-            f"channel's permission settings, then try again. "
-            f"(No API cost incurred — I check before starting.)",
-            ephemeral=True,
-        )
-        return
+    # Skipped for silent recaps: they're DM'd to the requester, never posted to
+    # the channel, so no channel post permissions are needed.
+    if not silent:
+        missing = bot_missing_channel_perms(interaction, RECAP_REQUIRED_PERMS)
+        if missing:
+            await interaction.followup.send(
+                f"🔒 I can't run a recap in this channel — I'm missing: "
+                f"**{', '.join(missing)}**.\n"
+                f"Ask a server admin to grant these to me (or my role) in this "
+                f"channel's permission settings, then try again. "
+                f"(No API cost incurred — I check before starting. Tip: `silent:true` "
+                f"DMs the recap to you and needs no channel permissions.)",
+                ephemeral=True,
+            )
+            return
 
     post_channel_id = interaction.channel_id
     guild_id = interaction.guild_id
@@ -112,6 +118,7 @@ async def recap(
         channel_label=format_channel_label(interaction.channel),
         force=force,
         profile=profile_value,
+        silent=silent,
     )
     if job is None:
         # Race: another /recap claimed this category between our check and claim
@@ -128,10 +135,12 @@ async def recap(
         queue: JobQueue = bot._job_queue
         await queue.enqueue(category_id)
 
+        where = "DM you the recap privately" if silent else "post the recap in this channel"
         msg = (
-            f"📜 Queued for **{category_name}**. I'll post the recap in this channel "
-            f"when ready and DM you live progress."
+            f"📜 Queued for **{category_name}**. I'll {where} when ready and DM you live progress."
         )
+        if silent:
+            msg += " 🤫 **Silent:** nothing will be posted in the channel."
         if profile_value != "default":
             msg += f" Profile: **{profile_value}**."
         if style:
