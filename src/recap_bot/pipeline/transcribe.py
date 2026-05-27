@@ -6,6 +6,7 @@ from google import genai
 from google.genai import types
 
 from recap_bot.config import settings, model_config
+from recap_bot.pipeline import llm
 from recap_bot.pipeline.cost import extract_usage, UsageInfo
 from recap_bot.prompts.transcribe import TRANSCRIPTION_PROMPT
 
@@ -39,8 +40,8 @@ async def transcribe_chunk(chunk_path: Path) -> tuple[str, UsageInfo | None]:
     else:
         raise RuntimeError("Gemini file did not become ACTIVE in time")
 
-    response = await asyncio.to_thread(
-        client.models.generate_content,
+    response = await llm.generate_content(
+        client,
         model=model,
         contents=[
             types.Part.from_text(text=TRANSCRIPTION_PROMPT),

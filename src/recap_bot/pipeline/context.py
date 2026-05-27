@@ -20,6 +20,7 @@ import re
 from google import genai
 
 from recap_bot.config import model_config, settings
+from recap_bot.pipeline import llm
 from recap_bot.pipeline.cost import UsageInfo, extract_usage
 
 logger = logging.getLogger(__name__)
@@ -93,11 +94,7 @@ Journals:
 """
 
     client = _get_client()
-    response = await asyncio.to_thread(
-        client.models.generate_content,
-        model=model,
-        contents=prompt,
-    )
+    response = await llm.generate_content(client, model=model, contents=prompt)
     text = (response.text or "").strip()
     usage = extract_usage(response, model)
 
@@ -147,11 +144,7 @@ Journal records:
 """
 
     client = _get_client()
-    response = await asyncio.to_thread(
-        client.models.generate_content,
-        model=model,
-        contents=prompt,
-    )
+    response = await llm.generate_content(client, model=model, contents=prompt)
     text = (response.text or "").strip()
     usage = extract_usage(response, model)
 
@@ -186,11 +179,7 @@ New recap journal:
 Return ONLY the updated scratchpad with the new entry appended."""
 
     client = _get_client()
-    response = await asyncio.to_thread(
-        client.models.generate_content,
-        model=model,
-        contents=prompt,
-    )
+    response = await llm.generate_content(client, model=model, contents=prompt)
 
     text = response.text or ""
     usage = extract_usage(response, model)
@@ -238,11 +227,7 @@ Output format:
 Return ONLY the updated roster inside the tags."""
 
     client = _get_client()
-    response = await asyncio.to_thread(
-        client.models.generate_content,
-        model=model,
-        contents=prompt,
-    )
+    response = await llm.generate_content(client, model=model, contents=prompt)
 
     text = response.text or ""
     roster = existing_roster

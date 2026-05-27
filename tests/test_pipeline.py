@@ -250,6 +250,54 @@ def test_cost_is_model_aware_and_totals_correctly(monkeypatch):
     assert abs(t.total_cost_usd - 12.5) < 1e-9
 
 
+# ----- transient-error retry (llm.generate_content) -----
+
+class _FakeGenAIClient:
+    """Stands in for genai.Client: .models.generate_content raises `code` the
+    first `fail_times` calls, then returns a sentinel."""
+
+    def __init__(self, fail_times: int, code: int):
+        self._fail = fail_times
+        self._code = code
+        self.calls = 0
+        self.models = self
+
+    def generate_content(self, *, model, contents, **kwargs):
+        self.calls += 1
+        if self.calls <= self._fail:
+            exc = Exception(f"{self._code} ERROR")
+            exc.code = self._code
+            raise exc
+        return "OK-RESPONSE"
+
+
+@pytest.mark.asyncio
+async def test_llm_retries_then_succeeds():
+    from recap_bot.pipeline import llm
+    c = _FakeGenAIClient(fail_times=2, code=500)
+    r = await llm.generate_content(c, model="m", contents="x", max_attempts=4, base_delay=0)
+    assert r == "OK-RESPONSE"
+    assert c.calls == 3  # failed twice, succeeded on the third
+
+
+@pytest.mark.asyncio
+async def test_llm_no_retry_on_client_error():
+    from recap_bot.pipeline import llm
+    c = _FakeGenAIClient(fail_times=5, code=400)  # 400 is not transient
+    with pytest.raises(Exception):
+        await llm.generate_content(c, model="m", contents="x", max_attempts=4, base_delay=0)
+    assert c.calls == 1  # raised immediately, no retry
+
+
+@pytest.mark.asyncio
+async def test_llm_gives_up_after_max_attempts():
+    from recap_bot.pipeline import llm
+    c = _FakeGenAIClient(fail_times=99, code=503)
+    with pytest.raises(Exception):
+        await llm.generate_content(c, model="m", contents="x", max_attempts=3, base_delay=0)
+    assert c.calls == 3  # tried exactly max_attempts times
+
+
 def test_resolve_category_returns_id_and_name():
     from recap_bot.commands._helpers import resolve_category
 

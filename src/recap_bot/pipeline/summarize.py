@@ -4,6 +4,7 @@ import logging
 from google import genai
 
 from recap_bot.config import settings, model_config
+from recap_bot.pipeline import llm
 from recap_bot.pipeline.cost import extract_usage, UsageInfo
 from recap_bot.storage import files as channel_files
 from recap_bot.prompts.summarize import build_summarize_prompt
@@ -37,11 +38,7 @@ async def summarize_session(category_id: int, transcript: str, style: str | None
     )
 
     client = _get_client()
-    response = await asyncio.to_thread(
-        client.models.generate_content,
-        model=model,
-        contents=prompt,
-    )
+    response = await llm.generate_content(client, model=model, contents=prompt)
 
     journal = response.text or ""
     if not journal:
