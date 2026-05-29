@@ -576,21 +576,13 @@ async def run_job(bot, category_id: int) -> None:
         else:
             # Post to the channel /recap was invoked in (job.channel_id), which
             # may differ from the journal channel — recap output and journals
-            # can live in different channels of the same category.
-            posted_msg_id = await discord_journals.post_journal(
+            # can live in different channels of the same category. The post is
+            # an embed only (no attachment); journal.md on disk is the durable
+            # copy and journals are no longer editable in place.
+            await discord_journals.post_journal(
                 bot, job.channel_id, journal_md,
                 vod_id=vod_id, title=job.title, date=in_game_date,
             )
-            # Remember the message id so /recap_edit can edit this post in-place
-            # later (swap the attachment) instead of leaving the visible post
-            # stale relative to journal.md on disk.
-            try:
-                channel_files.write_recap_message_id(recap_dir, posted_msg_id)
-            except Exception:
-                logger.exception(
-                    "Failed to persist discord_msg_id for category %s vod %s",
-                    category_id, vod_id,
-                )
             _mark_ui(category_id, "post", "done", note=f"VOD {vod_id}", tool="discord")
         step_log.step("post", tool="discord", progress="done", note=f"VOD {vod_id}")
 

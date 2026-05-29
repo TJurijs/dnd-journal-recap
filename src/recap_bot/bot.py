@@ -96,4 +96,4 @@ async def run_bot() -> None:
 
 
 # Import command modules so they register with the tree
-from recap_bot.commands import admin, check, initialize, jobs, recap, recap_edit, roster, scratchpad  # noqa: E402,F401
+from recap_bot.commands import admin, check, initialize, jobs, recap, roster, scratchpad  # noqa: E402,F401

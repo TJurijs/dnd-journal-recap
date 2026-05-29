@@ -166,9 +166,9 @@ def make_or_reuse_recap_dir(category_id: int, vod_id: str) -> Path:
 
 # --- Discord message id for the recap's posted journal ---
 #
-# Stored as a tiny text file alongside journal.md so /recap_edit can edit the
-# original Discord post in-place (swap its .md attachment) rather than letting
-# the visible post drift out of sync with the on-disk journal.
+# Stored as a tiny text file alongside journal.md. Generic helper retained for
+# possible future use; recap posts are embed-only and no longer edited in place,
+# so the orchestrator no longer writes this during a normal recap.
 
 _RECAP_MSG_ID_FILE = "discord_msg_id.txt"
 

@@ -528,6 +528,58 @@ def test_codeblock_embed_respects_description_limit_on_huge_input():
     assert embed.description.rstrip().endswith("```")
 
 
+# ----- Re-ingestion: reading the journal back out of an embed -----
+
+class _FakeEmbed:
+    def __init__(self, description):
+        self.description = description
+
+
+class _FakeMsg:
+    def __init__(self, embeds):
+        self.embeds = embeds
+
+
+def test_extract_embed_body_rendered():
+    """A standard (rendered) embed's description is returned verbatim."""
+    from recap_bot.storage.discord_journals import _extract_embed_body
+    body = "## Session Date: Winter\n\n## Scene 1\n- thing happened"
+    msg = _FakeMsg([_FakeEmbed(body)])
+    assert _extract_embed_body(msg) == body
+
+
+def test_extract_embed_body_strips_codeblock_fence():
+    """A silent (code-block) embed's ```md fence is stripped on read-back."""
+    from recap_bot.storage.discord_journals import _extract_embed_body
+    body = "## Scene 1\n- thing happened\n- and another"
+    msg = _FakeMsg([_FakeEmbed(f"```md\n{body}\n```")])
+    assert _extract_embed_body(msg) == body
+
+
+def test_extract_embed_body_no_embed_or_empty():
+    from recap_bot.storage.discord_journals import _extract_embed_body
+    assert _extract_embed_body(_FakeMsg([])) == ""
+    assert _extract_embed_body(_FakeMsg([_FakeEmbed("")])) == ""
+    assert _extract_embed_body(_FakeMsg([_FakeEmbed(None)])) == ""
+
+
+def test_roundtrip_embed_body_recovers_journal():
+    """Build a rendered embed from a journal, then read it back — the body
+    (minus the title, which lives in the message content header) survives."""
+    from recap_bot.storage.discord_journals import (
+        render_journal_embed,
+        _extract_embed_body,
+        _body_for_embed,
+    )
+    journal = "# Session 99\n\n## Session Date: Winter\n\n## Scene 1\n- the party fought a dragon"
+    embed = render_journal_embed(journal)
+    msg = _FakeMsg([_FakeEmbed(embed.description)])
+    recovered = _extract_embed_body(msg)
+    assert recovered == _body_for_embed(journal)
+    assert "## Scene 1" in recovered
+    assert "the party fought a dragon" in recovered
+
+
 # ----- _looks_repetitive: tells runaway loops from legit-long content -----
 
 def _make_clean_transcript(n_lines: int = 60) -> str:

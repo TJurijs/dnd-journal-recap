@@ -5,11 +5,12 @@ one journal per message, chronological. We don't filter by author or
 attachment type: every regular message in the channel is a journal entry.
 
 Content source for each message, in priority order:
-  1. A `.md` attachment, if present (preferred — the bot's own posts use this)
-  2. The message body (plain-text journals posted by players)
+  1. A `.md` attachment, if present (legacy — the bot used to attach one)
+  2. An embed description (current — the bot posts the journal as an embed)
+  3. The message body (plain-text journals posted by players)
 
-Messages with neither (e.g. image-only posts or system events like pins) are
-skipped. Session numbers are assigned 1..N based on chronological position.
+Messages with none of these (e.g. image-only posts or system events like pins)
+are skipped. Session numbers are assigned 1..N based on chronological position.
 
 If the message body matches `**Session N · date · style**`, those metadata
 fields are extracted for display; otherwise we fall back to the message's
@@ -49,6 +50,7 @@ class JournalEntry:
     attachment_filename: Optional[str] = None
     attachment: Optional[discord.Attachment] = field(default=None, repr=False)
     body: str = ""                     # plain-text fallback when no attachment
+    embed_body: str = ""               # journal text reconstructed from an embed post
     content: Optional[str] = None      # resolved content (filled by fetch_content)
 
 
@@ -64,19 +66,18 @@ def format_header(title: str) -> str:
 
 
 # --- Embed-based display -------------------------------------------------
-# The journal content is delivered TWO ways in one message:
-#   1. The `.md` attachment — the machine-readable source of truth. Re-ingestion
-#      (list_for_channel / fetch_content) reads this, and /recap_edit swaps it.
-#      Embeds are NEVER read back, so the attachment must always be present.
-#   2. An embed — purely for human display. Standard recaps render the markdown
-#      (pretty); silent recaps wrap it in a ```md code block (copy-paste keeps
-#      the markdown syntax).
+# The journal is posted as a single embed (no attachment):
+#   - Standard recaps render the markdown (pretty, reads inline).
+#   - Silent recaps wrap it in a ```md code block (copy-paste keeps the syntax).
+# The full journal.md stays on disk (data/categories/<id>/recaps/...) as the
+# durable source of truth; the channel post is display-only and journals are
+# not editable in place. Re-ingestion (list_for_channel / fetch_content) reads
+# the journal back from the embed body (see _extract_embed_body).
 # The 4000-char journal cap (see pipeline.summarize.MAX_JOURNAL_CHARS) keeps the
 # body within Discord's 4096-char embed-description limit, so one embed suffices.
 
 EMBED_COLOR = 0x9B59B6  # purple — magical without being garish
 _EMBED_DESC_LIMIT = 4096
-_SESSION_DATE_RE = re.compile(r"##\s*Session Date:\s*(.+?)(?:\n|$)", re.IGNORECASE)
 
 
 def _body_for_embed(journal_md: str) -> str:
@@ -123,6 +124,28 @@ def codeblock_journal_embed(journal_md: str, *, date: str = "") -> "discord.Embe
     return embed
 
 
+def _extract_embed_body(msg: "discord.Message") -> str:
+    """Pull journal text from a bot recap embed.
+
+    The journal body lives in the first embed's `description`. Strips a leading
+    ```md code-block fence if present (silent-mode embeds use one; channel posts
+    don't, but be robust in case one ever lands here). Returns "" if there's no
+    embed or no description.
+    """
+    if not msg.embeds:
+        return ""
+    desc = (msg.embeds[0].description or "").strip()
+    if not desc:
+        return ""
+    if desc.startswith("```"):
+        nl = desc.find("\n")
+        if nl != -1:
+            desc = desc[nl + 1:]
+        if desc.rstrip().endswith("```"):
+            desc = desc.rstrip()[:-3]
+    return desc.strip()
+
+
 # Discord MessageType values that represent real user/bot content (not system
 # notifications like joins, pins, thread-created, etc.)
 _USER_CONTENT_TYPES = {discord.MessageType.default, discord.MessageType.reply}
@@ -131,9 +154,9 @@ _USER_CONTENT_TYPES = {discord.MessageType.default, discord.MessageType.reply}
 async def list_for_channel(bot: discord.Client, channel_id: int, limit: int = 1000) -> list[JournalEntry]:
     """Treat every regular message in the channel as a journal entry.
 
-    Skips: system messages, and messages with neither a `.md` attachment nor a
-    non-empty body. Returns entries with session numbers 1..N in chronological
-    order (oldest first).
+    Skips: system messages, and messages with no content source (no `.md`
+    attachment, no embed body, no plain-text body). Returns entries with
+    session numbers 1..N in chronological order (oldest first).
     """
     channel = bot.get_channel(channel_id)
     if channel is None:
@@ -156,8 +179,18 @@ async def list_for_channel(bot: discord.Client, channel_id: int, limit: int = 10
         )
         body = (msg.content or "").strip()
 
+        # The bot's recap posts carry the journal in an embed, with just a bold
+        # title in the message content. Reconstruct the full journal text from
+        # the embed (de-bolded title header + embed body) so re-ingestion sees
+        # the same content the old `.md` attachment used to provide.
+        embed_raw = _extract_embed_body(msg)
+        embed_body = ""
+        if embed_raw:
+            title = body.strip("*").strip()
+            embed_body = f"# {title}\n\n{embed_raw}" if title else embed_raw
+
         # Need at least one source of content
-        if md_attachment is None and not body:
+        if md_attachment is None and not embed_body and not body:
             continue
 
         # Pull optional header metadata for nicer display. The new format
@@ -181,6 +214,7 @@ async def list_for_channel(bot: discord.Client, channel_id: int, limit: int = 10
             attachment_filename=md_attachment.filename if md_attachment else None,
             attachment=md_attachment,
             body=body,
+            embed_body=embed_body,
         ))
 
     return entries
@@ -191,7 +225,8 @@ async def fetch_content(category_id: int, entry: JournalEntry) -> str:
     CATEGORY (journals are scanned from the journal channel but cached per
     category, the storage scope).
 
-    Preference: existing disk cache → `.md` attachment → message body.
+    Preference: existing disk cache → `.md` attachment → embed body →
+    message body.
     """
     cached = await channel_files.read_journal_cache(category_id, entry.session)
     if cached is not None:
@@ -200,6 +235,8 @@ async def fetch_content(category_id: int, entry: JournalEntry) -> str:
     if entry.attachment is not None:
         raw = await entry.attachment.read()
         text = raw.decode("utf-8", errors="replace")
+    elif entry.embed_body:
+        text = entry.embed_body
     else:
         text = entry.body
 
@@ -228,31 +265,23 @@ async def post_journal(
     title: str,
     date: str,
 ) -> int:
-    """Post a journal message titled by the Twitch VOD title + .md attachment.
+    """Post a journal as a bold title header + rendered embed (no attachment).
 
-    Returns the Discord message id. The attachment filename embeds the date
-    and VOD id so the source is identifiable from the filename alone.
+    The journal.md stays on disk (the durable source of truth); the channel
+    post is display-only. Returns the Discord message id.
+
+    No `.md` attachment and no Edit button: journals are no longer editable in
+    place (only roster/scratchpad are). Re-ingestion (list_for_channel /
+    fetch_content) reads the journal back from the embed body.
     """
-    from io import BytesIO
-
     channel = bot.get_channel(channel_id)
     if channel is None:
         channel = await bot.fetch_channel(channel_id)
 
-    safe_date = re.sub(r"[^\w\-]", "_", date)
-    safe_vod = re.sub(r"[^\w\-]", "_", vod_id)
-    filename = f"recap-{safe_date}-vod{safe_vod}.md"
-
     header = format_header(title)
-    file = discord.File(BytesIO(journal_md.encode("utf-8")), filename=filename)
-    # Rendered embed for in-channel readability (no download needed). The .md
-    # attachment is kept as the machine-readable source for re-ingestion + edit.
+    # Rendered embed for in-channel readability (markdown rendered, no download).
     embed = render_journal_embed(journal_md, date=date)
-    # Persistent "✏️ Edit" button so anyone with Manage Channels can re-run
-    # /recap_edit for this specific recap.
-    from recap_bot.commands._edit_button import make_edit_view
-    view = make_edit_view("journal", vod_id)
-    msg = await channel.send(content=header, embed=embed, file=file, view=view)
+    msg = await channel.send(content=header, embed=embed)
     return msg.id
 
 
@@ -265,104 +294,20 @@ async def dm_journal(
     title: str,
     date: str,
 ) -> None:
-    """DM the journal .md privately to a user (for a `silent` recap).
+    """DM the journal privately to a user (for a `silent` recap) as a code-block
+    embed — no attachment.
 
-    No channel post, no Edit button (the /recap_edit flow operates on channel
-    messages, not DMs). Raises if the user can't be resolved or DMs are closed.
+    The code block lets the user select + copy the raw markdown and paste it
+    elsewhere with formatting intact. The journal.md stays on disk. Raises if
+    the user can't be resolved or DMs are closed.
     """
-    from io import BytesIO
-
     user = bot.get_user(user_id) or await bot.fetch_user(user_id)
     if user is None:
         raise RuntimeError(f"Could not resolve user {user_id} to DM the silent recap")
 
-    safe_date = re.sub(r"[^\w\-]", "_", date)
-    safe_vod = re.sub(r"[^\w\-]", "_", vod_id)
-    filename = f"recap-{safe_date}-vod{safe_vod}.md"
-
     header = format_header(title)
-    file = discord.File(BytesIO(journal_md.encode("utf-8")), filename=filename)
-    # Code-block embed so the user can select + copy the raw markdown and paste
-    # it elsewhere with formatting intact. The .md attachment is also included
-    # for download/archive.
     embed = codeblock_journal_embed(journal_md, date=date)
     await user.send(
         content=f"🤫 **Silent recap** (not posted in the channel):\n{header}",
         embed=embed,
-        file=file,
     )
-
-
-async def edit_journal_message(
-    bot: discord.Client,
-    channel_id: int,
-    message_id: int,
-    new_md_bytes: bytes,
-) -> Optional[int]:
-    """Edit a previously-posted recap message in place: swap the `.md` attachment.
-
-    Preserves the original message content (bold title header), the existing
-    attachment filename, and the persistent "✏️ Edit" view. Returns the
-    message id on success. Returns `None` if the original message was deleted
-    (in which case the caller should not write to disk, so on-disk and
-    in-channel stay in sync).
-    """
-    from io import BytesIO
-
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        channel = await bot.fetch_channel(channel_id)
-
-    try:
-        msg = await channel.fetch_message(message_id)
-    except discord.NotFound:
-        return None
-
-    existing_md = next(
-        (a for a in msg.attachments if a.filename.lower().endswith(".md")),
-        None,
-    )
-    filename = existing_md.filename if existing_md else "recap.md"
-
-    file = discord.File(BytesIO(new_md_bytes), filename=filename)
-    # Rebuild the rendered embed from the new content so the visible embed stays
-    # in lockstep with the swapped attachment. Recap_edit only operates on
-    # channel posts (which are always the rendered/standard variant), so we
-    # rebuild the rendered embed here. Parse the Session Date for the footer.
-    new_text = new_md_bytes.decode("utf-8", errors="replace")
-    date_match = _SESSION_DATE_RE.search(new_text)
-    date = date_match.group(1).strip() if date_match else ""
-    embed = render_journal_embed(new_text, date=date)
-    # Omitting content= and view= keeps them unchanged; attachments=[file]
-    # replaces the attachment list, embeds=[embed] replaces the embed list.
-    await msg.edit(attachments=[file], embeds=[embed])
-    return msg.id
-
-
-async def find_recap_message_id(
-    bot: discord.Client, channel_id: int, vod_id: str, scan_limit: int = 500,
-) -> Optional[int]:
-    """Scan recent channel history for the bot's recap post for this VOD.
-
-    Backfill path for `/recap_edit` when `discord_msg_id.txt` is missing
-    (e.g. recap was posted before this feature shipped). Matches by `.md`
-    attachment filename containing `vod<vod_id>` — that's the pattern
-    `post_journal()` writes.
-    """
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        try:
-            channel = await bot.fetch_channel(channel_id)
-        except discord.NotFound:
-            return None
-
-    needle = f"vod{vod_id}"
-    bot_id = bot.user.id if bot.user else None
-    async for msg in channel.history(limit=scan_limit, oldest_first=False):
-        if bot_id is not None and msg.author.id != bot_id:
-            continue
-        for a in msg.attachments:
-            name = a.filename.lower()
-            if name.endswith(".md") and needle in name:
-                return msg.id
-    return None

@@ -45,11 +45,21 @@ class EditHintButton(ui.DynamicItem[ui.Button], template=_CUSTOM_ID_TEMPLATE):
             return f"/roster action:edit file:<your roster.md>{vod_param}"
         if self.kind == "scratchpad":
             return f"/scratchpad action:edit file:<your scratchpad.md>{vod_param}"
-        if self.kind == "journal":
-            return f"/recap_edit vod_id:{self.vod_id or '<id>'} file:<your journal.md>"
         return f"/<unknown:{self.kind}>"
 
     async def callback(self, interaction: discord.Interaction):
+        # Journal editing was removed (recap posts are now embed-only, no
+        # attachment). Old recap posts may still carry a "journal" Edit button;
+        # tell the user it's no longer supported instead of pointing at a
+        # command that no longer exists.
+        if self.kind == "journal":
+            await interaction.response.send_message(
+                "Editing recap journals in place is no longer supported — recaps "
+                "are posted as embeds now. To refresh a recap, re-run `/recap` on "
+                "the same VOD. (Roster and scratchpad are still editable.)",
+                ephemeral=True,
+            )
+            return
         cmd = self._format_command()
         await interaction.response.send_message(
             f"To replace this file, run:\n```\n{cmd}\n```\n"
