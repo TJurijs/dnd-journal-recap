@@ -19,7 +19,7 @@ import discord
 from recap_bot.config import settings, model_config
 from recap_bot.pipeline import state
 from recap_bot.pipeline.audio import extract_audio
-from recap_bot.pipeline.chunk_audio import chunk_audio
+from recap_bot.pipeline.chunk_audio import audio_duration, chunk_audio
 from recap_bot.pipeline.context import update_roster, update_scratchpad
 from recap_bot.pipeline.cost import CostTracker, UsageInfo
 from recap_bot.pipeline.download import download_vod, get_vod_info
@@ -311,6 +311,12 @@ async def run_job(bot, category_id: int) -> None:
                 shutil.rmtree(chunk_cache_dir, ignore_errors=True)
             step_log.step("cache_wipe", tool="fs", progress="done", note=f"vod={vod_id}")
 
+        # chunk_duration_sec: per-chunk length in seconds. Used to compute
+        # absolute timestamp ranges for any chunk that fails transcription.
+        # Populated by either the cache path (ffprobe audio.mp3) or the
+        # fresh chunking step (returned by chunk_audio).
+        chunk_duration_sec: float = 0.0
+
         skip_pipeline = False
         if chunk_cache_dir.exists():
             cached_chunks = sorted(chunk_cache_dir.glob("chunk_*.mp3"))
@@ -321,6 +327,13 @@ async def run_job(bot, category_id: int) -> None:
                 _mark_ui(category_id, "chunk", "skipped", "20 chunks cached", tool="cache")
                 await _send_status(bot, user_id, category_id, total_cost=cost_tracker.format_total())
                 chunk_paths = cached_chunks
+                # Cached path: ffprobe audio.mp3 to recover chunk_duration so
+                # failure timestamps still work on re-runs.
+                if cached_audio.exists():
+                    try:
+                        chunk_duration_sec = (await audio_duration(cached_audio)) / 20
+                    except Exception:
+                        logger.exception("Failed to probe cached audio duration; failure timestamps will be unavailable")
                 skip_pipeline = True
 
         if not skip_pipeline:
@@ -403,7 +416,9 @@ async def run_job(bot, category_id: int) -> None:
             await _send_status(bot, user_id, category_id, total_cost=cost_tracker.format_total())
             # chunk_audio writes chunk_*.mp3 directly into chunk_cache_dir, which
             # is `recap_dir/chunks/` — no separate copy step needed.
-            chunk_paths = await chunk_audio(audio_path, chunk_cache_dir, num_chunks=20, progress_cb=_chunk_progress)
+            chunk_paths, chunk_duration_sec = await chunk_audio(
+                audio_path, chunk_cache_dir, num_chunks=20, progress_cb=_chunk_progress,
+            )
             _mark_ui(category_id, "chunk", "done", f"{len(chunk_paths)} chunks", pct=100, tool="ffmpeg")
             step_log.step("chunk", tool="ffmpeg", progress="done", note=f"{len(chunk_paths)} chunks")
 
@@ -416,6 +431,9 @@ async def run_job(bot, category_id: int) -> None:
 
         total_chunks = len(chunk_paths)
         transcript_parts: list[str | None] = [None] * total_chunks
+        # Failures surfaced to the user in the DM finish status with absolute
+        # VOD timestamps. Each entry is (idx, start_sec, end_sec, reason).
+        chunk_failures: list[tuple[int, float, float, str]] = []
         completed_count = 0
 
         # All 20 chunks fire in parallel (one Gemini call per chunk).
@@ -423,31 +441,45 @@ async def run_job(bot, category_id: int) -> None:
 
         async def _bounded_transcribe(idx: int, chunk_path: Path):
             async with semaphore:
-                part, usage = await transcribe_chunk(chunk_path, profile)
-                return idx, part, usage
+                part, usage, failure = await transcribe_chunk(chunk_path, profile)
+                return idx, part, usage, failure
 
         tasks = [asyncio.create_task(_bounded_transcribe(i, cp)) for i, cp in enumerate(chunk_paths)]
 
         for coro in asyncio.as_completed(tasks):
-            idx, part, usage = await coro
+            idx, part, usage, failure = await coro
             transcript_parts[idx] = part
+            if failure is not None:
+                start = idx * chunk_duration_sec
+                end = (idx + 1) * chunk_duration_sec
+                chunk_failures.append((idx, start, end, failure))
+                logger.warning(
+                    "Transcribe gap on chunk %d (%.1f-%.1fs): %s",
+                    idx, start, end, failure,
+                )
             completed_count += 1
             pct = int(completed_count / total_chunks * 100)
+            note = f"{completed_count}/{total_chunks} chunks"
+            if chunk_failures:
+                note += f", {len(chunk_failures)} gap(s)"
             _mark_ui(
                 category_id, "transcribe", "current",
-                note=f"{completed_count}/{total_chunks} chunks",
+                note=note,
                 pct=pct, tool=transcribe_model, cost_delta=usage,
             )
             await _send_status(bot, user_id, category_id, total_cost=cost_tracker.format_total())
             step_log.step("transcribe", model=transcribe_model, progress=f"{completed_count}/{total_chunks} ({pct}%)", usage=usage)
 
         transcript = "\n\n".join(part for part in transcript_parts if part)
+        done_note = f"{total_chunks} chunks"
+        if chunk_failures:
+            done_note += f", {len(chunk_failures)} gap(s)"
         _mark_ui(
             category_id, "transcribe", "done",
-            note=f"{total_chunks} chunks",
+            note=done_note,
             pct=100, tool=transcribe_model,
         )
-        step_log.step("transcribe", model=transcribe_model, progress="done", note=f"{total_chunks} chunks")
+        step_log.step("transcribe", model=transcribe_model, progress="done", note=done_note)
 
         # Persist transcript inside this run's recap folder.
         channel_files.write_text_atomic(recap_dir / "transcript.txt", transcript)
@@ -548,6 +580,7 @@ async def run_job(bot, category_id: int) -> None:
             success=True,
             total_cost=cost_tracker.format_total(),
             changes=changes,
+            chunk_failures=chunk_failures,
         )
 
     except asyncio.CancelledError:
@@ -592,6 +625,41 @@ async def run_job(bot, category_id: int) -> None:
         state.release(category_id)
 
 
+_FAILURE_LABELS = {
+    "safety":     "blocked by content filter",
+    "max_tokens": "output cap hit (model went runaway)",
+    "empty":      "empty response (unknown cause)",
+}
+
+
+def _format_ts(sec: float) -> str:
+    """Format seconds as MM:SS (under an hour) or H:MM:SS (an hour+).
+
+    Returns "??:??" when chunk_duration was unavailable (e.g. ffprobe failed on
+    the cached audio) so the user sees gaps were detected but no timestamp.
+    """
+    if sec <= 0:
+        return "??:??"
+    total = int(sec)
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+def _format_chunk_failures(failures: list[tuple[int, float, float, str]], total: int = 20) -> str:
+    """Render the failed-chunk list as a Discord message section.
+
+    Empty string when there were no failures — caller just doesn't append.
+    """
+    if not failures:
+        return ""
+    lines = [f"⚠️ **Transcription gaps ({len(failures)}/{total} chunks):**"]
+    for idx, start, end, reason in sorted(failures):
+        label = _FAILURE_LABELS.get(reason, reason)
+        lines.append(f"• `{_format_ts(start)} – {_format_ts(end)}` — {label}")
+    return "\n".join(lines)
+
+
 async def _finish_status(
     bot, user_id: int, category_id: int,
     *,
@@ -599,12 +667,14 @@ async def _finish_status(
     error: str = "",
     total_cost: str = "",
     changes: str = "",
+    chunk_failures: list[tuple[int, float, float, str]] | None = None,
 ) -> None:
     msg = _status_msgs.pop(category_id, None)
     if not msg:
         return
     job = state.get(category_id)
     title = (job.title if job else "") or f"Recap (channel {category_id})"
+    failures_text = _format_chunk_failures(chunk_failures or [])
     try:
         if success:
             where = (
@@ -616,6 +686,8 @@ async def _finish_status(
         else:
             header = f"❌ **{title} failed:**\n{error[:1000]}"
         text = _build_status_text(category_id, total_cost=total_cost, header=header)
+        if failures_text:
+            text += f"\n\n{failures_text}"
         if changes:
             text += f"\n\n{changes}"
         # Discord caps message content at 2000 chars; truncate defensively.
@@ -634,6 +706,8 @@ async def _finish_status(
                     content = f"❌ {title} failed: {error[:1000]}"
                 if total_cost:
                     content += f"\n💰 Total API cost: {total_cost}"
+                if failures_text:
+                    content += f"\n\n{failures_text}"
                 if changes and success:
                     content += f"\n\n{changes[:1000]}"
                 await user.send(content[:1990])

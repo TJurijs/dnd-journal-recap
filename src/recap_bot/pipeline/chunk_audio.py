@@ -12,13 +12,13 @@ def _tail(text: str, n: int = 800) -> str:
     return text[-n:] if len(text) > n else text
 
 
-async def chunk_audio(audio_path: Path, dest_dir: Path, num_chunks: int = 5, progress_cb=None) -> list[Path]:
-    """Split an audio file into N roughly equal chunks using ffmpeg."""
-    if num_chunks < 1:
-        return [audio_path]
+async def audio_duration(audio_path: Path) -> float:
+    """ffprobe `audio_path` and return its duration in seconds.
 
-    # Probe duration so we can clamp the final chunk and avoid `-ss past EOF`
-    # failures on truncated/imprecise audio.
+    Exposed separately so callers that already have chunk files on disk (the
+    cached-chunks path in the orchestrator) can still compute per-chunk
+    timestamps without re-running the full chunking pipeline.
+    """
     cmd = [
         "ffprobe",
         "-v", "error",
@@ -34,15 +34,31 @@ async def chunk_audio(audio_path: Path, dest_dir: Path, num_chunks: int = 5, pro
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {_tail(stderr.decode(errors='replace'))}")
-
     try:
         duration = float(stdout.decode().strip())
     except ValueError:
         raise RuntimeError("ffprobe returned invalid duration")
-
     if duration <= 0:
         raise RuntimeError(f"Audio file has zero or negative duration ({duration})")
+    return duration
 
+
+async def chunk_audio(
+    audio_path: Path, dest_dir: Path, num_chunks: int = 5, progress_cb=None,
+) -> tuple[list[Path], float]:
+    """Split an audio file into N roughly equal chunks using ffmpeg.
+
+    Returns `(chunk_paths, chunk_duration_sec)`. The duration is exposed so
+    the orchestrator can compute start/end timestamps for each chunk (used
+    when surfacing transcription failures to the user with absolute time
+    ranges in the source VOD).
+    """
+    if num_chunks < 1:
+        return [audio_path], 0.0
+
+    # Probe duration so we can clamp the final chunk and avoid `-ss past EOF`
+    # failures on truncated/imprecise audio.
+    duration = await audio_duration(audio_path)
     chunk_duration = duration / num_chunks
     chunks: list[Path] = []
 
@@ -96,4 +112,4 @@ async def chunk_audio(audio_path: Path, dest_dir: Path, num_chunks: int = 5, pro
     if progress_cb:
         await progress_cb(num_chunks, num_chunks)
     logger.info("Split %s into %d chunks (duration=%.1fs)", audio_path, len(chunks), duration)
-    return chunks
+    return chunks, chunk_duration
