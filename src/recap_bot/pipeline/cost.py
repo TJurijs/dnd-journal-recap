@@ -142,11 +142,31 @@ class CostTracker:
         self._total_cost = 0.0
         self._by_model: dict[str, UsageInfo] = {}
 
-    def add(self, usage: UsageInfo | None) -> None:
+    def add(self, usage: "UsageInfo | list[UsageInfo] | None") -> None:
+        """Add one UsageInfo, or a list of them, to the running total.
+
+        Lists are unpacked so each entry is priced at its OWN model's rate.
+        This matters when one pipeline step crosses model boundaries — e.g.
+        the transcribe step now mixes default-profile and high-profile calls
+        on chunks that retry after a max_tokens loop. Summing UsageInfos via
+        __add__ first would lose the per-call model tag and under-count the
+        more-expensive call's tokens.
+        """
+        if usage is None:
+            return
+        if isinstance(usage, list):
+            for u in usage:
+                self._add_one(u)
+            return
+        self._add_one(usage)
+
+    def _add_one(self, usage: "UsageInfo | None") -> None:
         if not usage:
             return
         self._total_cost += usage.cost_usd
         key = usage.model or "(unknown)"
+        # Per-model bucket uses __add__ on same-model UsageInfos, which is the
+        # safe usage of __add__ (model tag preserved).
         self._by_model[key] = self._by_model.get(key, UsageInfo(model=usage.model)) + usage
 
     @property

@@ -212,7 +212,7 @@ def _ffmpeg_split(source: Path, dest_dir: Path, num_subchunks: int) -> list[Path
 async def _rescue_via_subchunks(
     chunk_path: Path,
     profile: str | None,
-) -> tuple[str, UsageInfo | None, int, int]:
+) -> tuple[str, list[UsageInfo], int, int]:
     """Recover a safety-blocked chunk by re-splitting it into sub-chunks.
 
     The PROHIBITED_CONTENT classifier scores audio over the whole window. By
@@ -221,9 +221,11 @@ async def _rescue_via_subchunks(
     on Splitlanders S238 chunk_005: 8/8 sub-chunks transcribed cleanly on
     gemini-2.5-flash-lite where the parent was hard-blocked.
 
-    Returns (combined_transcript, combined_usage, n_succeeded, n_total).
-    Sub-chunks that themselves fail are inlined as placeholder markers in
-    the combined transcript — we never recurse further (no infinite split).
+    Returns (combined_transcript, all_usages, n_succeeded, n_total) where
+    all_usages is the flat list of every API call's UsageInfo across all
+    sub-chunk transcribes (including any retry-on-high those sub-chunks did
+    internally). Each entry keeps its own model tag so CostTracker can
+    price it at the right rate.
     """
     with tempfile.TemporaryDirectory(prefix="rescue_") as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -233,7 +235,7 @@ async def _rescue_via_subchunks(
             )
         except Exception:
             logger.exception("ffmpeg split failed for rescue of %s", chunk_path.name)
-            return "", None, 0, 0
+            return "", [], 0, 0
 
         # Transcribe sub-chunks in parallel. _allow_safety_rescue=False prevents
         # infinite recursion if a sub-chunk also fails safety.
@@ -251,22 +253,21 @@ async def _rescue_via_subchunks(
     # that still failed get a per-sub-chunk placeholder. (recovery_action
     # from sub-chunks is discarded — only the chunk-level summary matters.)
     parts: list[str] = []
-    total_usage: UsageInfo | None = None
+    all_usages: list[UsageInfo] = []
     n_ok = 0
     for r in results:
         if isinstance(r, Exception):
             logger.warning("Sub-chunk transcribe raised: %s", r)
             parts.append("[transcription unavailable for this segment]")
             continue
-        sub_text, sub_usage, sub_failure, _sub_recovery = r
-        if sub_usage is not None:
-            total_usage = (total_usage + sub_usage) if total_usage is not None else sub_usage
+        sub_text, sub_usages, sub_failure, _sub_recovery = r
+        all_usages.extend(sub_usages)
         if sub_failure is None:
             n_ok += 1
         parts.append(sub_text)
 
     combined = "\n\n".join(parts)
-    return combined, total_usage, n_ok, len(results)
+    return combined, all_usages, n_ok, len(results)
 
 
 async def transcribe_chunk(
@@ -274,13 +275,17 @@ async def transcribe_chunk(
     profile: str | None = None,
     *,
     _allow_safety_rescue: bool = True,
-) -> tuple[str, UsageInfo | None, str | None, str | None]:
+) -> tuple[str, list[UsageInfo], str | None, str | None]:
     """Transcribe a single audio chunk.
 
-    Returns (transcript, usage, failure_reason, recovery_action):
+    Returns (transcript, usages, failure_reason, recovery_action):
       - transcript: real text (possibly truncated but valid) OR a placeholder
         if the chunk failed and all recovery paths also failed.
-      - usage: combined token/cost across the primary call + any retries/rescues.
+      - usages: list of UsageInfo, one per actual API call made for this chunk
+        (primary call + any retry-on-high + every sub-chunk's recursive calls).
+        Each entry keeps its own model tag so CostTracker prices it at the
+        right rate. Summing them via UsageInfo.__add__ first would drop the
+        per-call model tag and under-count expensive calls.
       - failure_reason: None on success, else one of "safety", "max_tokens",
         "empty".
       - recovery_action: None if the primary call succeeded cleanly. Else a
@@ -336,6 +341,15 @@ async def transcribe_chunk(
     failure = _classify(transcript, finish, block)
     recovery_action: str | None = None
 
+    # Every API call's UsageInfo gets appended here with its own model tag so
+    # CostTracker can price each one at the right rate. NEVER sum these via
+    # UsageInfo.__add__ before billing — that would drop the per-call model
+    # tag and under-count anything billed at a higher rate (e.g. the
+    # high-profile retry's 3.1-flash-lite tokens).
+    usages: list[UsageInfo] = []
+    if usage is not None:
+        usages.append(usage)
+
     # MAX_TOKENS: distinguish real runaway from legit-long content.
     if failure == "max_tokens":
         if _looks_repetitive(transcript):
@@ -367,9 +381,11 @@ async def transcribe_chunk(
             logger.exception("Retry of chunk %s on %s raised", chunk_path.name, high_model)
             t2, u2, f2_finish, f2_block = "", None, "", ""
 
-        # Accumulate billed usage from both calls — we paid for both.
+        # Append the retry's usage so it's billed at the high model's rate
+        # (NOT summed into the primary call's UsageInfo, which would lose
+        # the model tag and under-count by ~62% for retry tokens).
         if u2 is not None:
-            usage = (usage + u2) if usage is not None else u2
+            usages.append(u2)
 
         failure_retry = _classify(t2, f2_finish, f2_block)
         if failure_retry == "max_tokens" and not _looks_repetitive(t2):
@@ -412,11 +428,12 @@ async def transcribe_chunk(
             "Chunk %s safety-blocked — attempting localized rescue (%d sub-chunks)",
             chunk_path.name, SAFETY_RESCUE_SUBCHUNKS,
         )
-        rescue_text, rescue_usage, n_ok, n_total = await _rescue_via_subchunks(
+        rescue_text, rescue_usages, n_ok, n_total = await _rescue_via_subchunks(
             chunk_path, profile,
         )
-        if rescue_usage is not None:
-            usage = (usage + rescue_usage) if usage is not None else rescue_usage
+        # Flat-extend so every sub-chunk's calls (which may themselves include
+        # retry-on-high) are billed individually at their own model rates.
+        usages.extend(rescue_usages)
 
         if n_ok > 0:
             logger.info(
@@ -440,11 +457,11 @@ async def transcribe_chunk(
         )
         transcript = "[transcription unavailable for this segment]"
 
-    return transcript, usage, failure, recovery_action
+    return transcript, usages, failure, recovery_action
 
 
 async def transcribe_audio(
     audio_path: Path, profile: str | None = None,
-) -> tuple[str, UsageInfo | None, str | None, str | None]:
+) -> tuple[str, list[UsageInfo], str | None, str | None]:
     """Transcribe a full audio file (single chunk)."""
     return await transcribe_chunk(audio_path, profile)

@@ -394,6 +394,60 @@ def test_extract_usage_tags_model():
     assert u.model == "gemini-3.1-pro-preview"
 
 
+def test_cost_tracker_add_list_prices_each_call_at_its_own_model():
+    """Mixed-model recoveries (e.g. retry on `high`) must price each call at
+    its OWN model's rate. Summing UsageInfos via __add__ first drops the
+    per-call model tag and under-counts the more-expensive call's tokens.
+
+    Regression test for the under-counting bug found while reviewing recovery
+    cost accounting: transcribe_chunk was returning `usage_a + usage_b` for
+    a chunk that retried on a different model; the combined UsageInfo kept
+    only the first model's tag and CostTracker priced ALL tokens at that
+    (cheaper) model's rate.
+    """
+    from recap_bot.pipeline.cost import CostTracker, UsageInfo
+
+    # Two calls on two different models — typical mixed-model retry case.
+    default_call = UsageInfo(input_tokens=10_000, output_tokens=5_000,
+                             model="gemini-2.5-flash-lite")
+    high_call = UsageInfo(input_tokens=10_000, output_tokens=5_000,
+                          model="gemini-3.1-flash-lite")
+
+    # Buggy behaviour we're guarding against: summing first, then adding the
+    # combined object — would price all 20k input + 10k output at 2.5-lite
+    # rates because __add__ keeps the first model's tag.
+    buggy = default_call + high_call
+    tracker_buggy = CostTracker()
+    tracker_buggy.add(buggy)
+
+    # Correct behaviour: add the list, CostTracker unpacks and prices each.
+    tracker_correct = CostTracker()
+    tracker_correct.add([default_call, high_call])
+
+    # Each call separately, for the ground-truth reference.
+    tracker_ref = CostTracker()
+    tracker_ref.add(default_call)
+    tracker_ref.add(high_call)
+
+    # Correct path matches the reference exactly.
+    assert tracker_correct.total_cost_usd == pytest.approx(tracker_ref.total_cost_usd)
+
+    # And the correct path costs MORE than the buggy path — high-lite is
+    # priced higher than 2.5-lite, so giving it its proper rate increases
+    # the total. (If somebody re-introduces the bug, this assertion fires.)
+    assert tracker_correct.total_cost_usd > tracker_buggy.total_cost_usd
+
+
+def test_cost_tracker_add_handles_none_and_empty_list():
+    """Edge cases — None and empty-list inputs shouldn't error or change total."""
+    from recap_bot.pipeline.cost import CostTracker
+    t = CostTracker()
+    t.add(None)
+    t.add([])
+    t.add([None, None])
+    assert t.total_cost_usd == 0.0
+
+
 # ----- _looks_repetitive: tells runaway loops from legit-long content -----
 
 def _make_clean_transcript(n_lines: int = 60) -> str:

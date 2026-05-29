@@ -85,7 +85,7 @@ def _init_ui(category_id: int) -> None:
 def _mark_ui(
     category_id: int, key: str, status: str,
     note: str = "", pct: int = 0,
-    tool: str = "", cost_delta: UsageInfo | None = None,
+    tool: str = "", cost_delta: "UsageInfo | list[UsageInfo] | None" = None,
 ) -> None:
     log = _step_ui.get(category_id)
     if log is None:
@@ -97,7 +97,16 @@ def _mark_ui(
     if tool:
         entry["tool"] = tool
     if cost_delta:
-        entry["cost"] = entry["cost"] + cost_delta
+        # cost_delta may be a list (transcribe step now returns one UsageInfo
+        # per actual API call so each can be billed at its own model's rate).
+        # For the per-step UI display we sum tokens; the headline cost via
+        # CostTracker.format_total() remains accurate either way.
+        if isinstance(cost_delta, list):
+            for u in cost_delta:
+                if u is not None:
+                    entry["cost"] = entry["cost"] + u
+        else:
+            entry["cost"] = entry["cost"] + cost_delta
 
 
 def _build_status_text(category_id: int, total_cost: str = "", header: str = "") -> str:
@@ -445,13 +454,18 @@ async def run_job(bot, category_id: int) -> None:
 
         async def _bounded_transcribe(idx: int, chunk_path: Path):
             async with semaphore:
-                part, usage, failure, recovery = await transcribe_chunk(chunk_path, profile)
-                return idx, part, usage, failure, recovery
+                # transcribe_chunk returns a LIST of UsageInfo (one per actual
+                # API call) so each can be billed at its own model's rate by
+                # CostTracker. See cost.py / transcribe.py for the bug this
+                # fixes (mixed-model summing dropped the per-call model tag
+                # and under-counted high-model retries by ~62%).
+                part, usages, failure, recovery = await transcribe_chunk(chunk_path, profile)
+                return idx, part, usages, failure, recovery
 
         tasks = [asyncio.create_task(_bounded_transcribe(i, cp)) for i, cp in enumerate(chunk_paths)]
 
         for coro in asyncio.as_completed(tasks):
-            idx, part, usage, failure, recovery = await coro
+            idx, part, usages, failure, recovery = await coro
             transcript_parts[idx] = part
             start = idx * chunk_duration_sec
             end = (idx + 1) * chunk_duration_sec
@@ -477,10 +491,12 @@ async def run_job(bot, category_id: int) -> None:
             _mark_ui(
                 category_id, "transcribe", "current",
                 note=note,
-                pct=pct, tool=transcribe_model, cost_delta=usage,
+                pct=pct, tool=transcribe_model, cost_delta=usages,
             )
             await _send_status(bot, user_id, category_id, total_cost=cost_tracker.format_total())
-            step_log.step("transcribe", model=transcribe_model, progress=f"{completed_count}/{total_chunks} ({pct}%)", usage=usage)
+            # step_log.step handles the list — each entry priced at its own
+            # model's rate inside CostTracker.add.
+            step_log.step("transcribe", model=transcribe_model, progress=f"{completed_count}/{total_chunks} ({pct}%)", usage=usages)
 
         transcript = "\n\n".join(part for part in transcript_parts if part)
         done_note = f"{total_chunks} chunks"

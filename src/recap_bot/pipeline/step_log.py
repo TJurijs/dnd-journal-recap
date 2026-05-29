@@ -33,12 +33,32 @@ class StepLog:
         model: Optional[str] = None,
         tool: Optional[str] = None,
         progress: Optional[str] = None,
-        usage: Optional[UsageInfo] = None,
+        usage: "UsageInfo | list[UsageInfo] | None" = None,
         note: Optional[str] = None,
     ) -> None:
-        """Log one step event. `usage` is added to the running cost total."""
+        """Log one step event. `usage` is added to the running cost total.
+
+        `usage` may be a single UsageInfo or a list of them (e.g. when a
+        single chunk retried on a different model and we want to bill each
+        call at its own model's rate). The list is unpacked inside
+        CostTracker.add so per-call model tags survive.
+        """
         if usage:
             self.cost.add(usage)
+
+        # For the log line's `cost=$X` display, sum tokens to one synthetic
+        # UsageInfo. Cost on this synthetic object is approximate when models
+        # mix (uses the first model's rate), but the headline `total=$X` from
+        # the cost tracker remains accurate.
+        if isinstance(usage, list):
+            display_usage = UsageInfo()
+            for u in usage:
+                if u is not None:
+                    display_usage = display_usage + u
+            if display_usage.total_tokens == 0:
+                display_usage = None
+        else:
+            display_usage = usage
 
         parts = [f"ctx={self.context}", f"step={name}"]
         if model:
@@ -49,8 +69,8 @@ class StepLog:
             parts.append(f"progress={progress}")
         if note:
             parts.append(f"note={note!r}")
-        if usage:
-            parts.append(f"cost={usage.format_cost()}")
+        if display_usage:
+            parts.append(f"cost={display_usage.format_cost()}")
         parts.append(f"total={self.cost.format_total()}")
 
         logger.info(
@@ -62,7 +82,7 @@ class StepLog:
                 "tool": tool,
                 "progress": progress,
                 "note": note,
-                "cost_usd": usage.cost_usd if usage else None,
+                "cost_usd": display_usage.cost_usd if display_usage else None,
                 "total_usd": self.cost.total_cost_usd,
             },
         )
