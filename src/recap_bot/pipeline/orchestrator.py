@@ -628,8 +628,9 @@ async def run_job(bot, category_id: int) -> None:
 _FAILURE_LABELS = {
     # By the time a failure surfaces here, the transcribe layer has already
     # done a repetition check + (if not already on high) retried on the high
-    # profile model. So these labels mean "all recovery attempts failed."
-    "safety":     "blocked by content filter (input gate — no retry possible)",
+    # profile model + (for safety) attempted a localized re-chunking rescue.
+    # So these labels mean "all recovery attempts failed."
+    "safety":     "blocked by content filter (sub-chunk rescue also blocked)",
     "max_tokens": "output looped, retry also looped",
     "empty":      "empty response, retry also empty",
 }

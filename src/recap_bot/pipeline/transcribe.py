@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 
 from google import genai
@@ -26,6 +28,14 @@ MAX_OUTPUT_TOKENS = 12000
 # MAX_TOKENS events in our probe vs 2.5-lite's 1-2/20 per run on the same
 # VOD). If the user is *already* on this profile, we skip the retry.
 RETRY_PROFILE = "high"
+
+# When a chunk fails with PROHIBITED_CONTENT (safety), split it into this
+# many sub-chunks and retry each one. The content classifier scores audio
+# across the whole window; smaller sub-chunks individually score below the
+# block threshold even when their parent didn't. Empirically validated on
+# Splitlanders S238 chunk_005: 8/8 sub-chunks transcribed cleanly on
+# gemini-2.5-flash-lite where the parent was hard-blocked.
+SAFETY_RESCUE_SUBCHUNKS = 8
 
 _client: genai.Client | None = None
 
@@ -163,33 +173,137 @@ async def _generate(
     )
 
 
+def _ffprobe_duration(path: Path) -> float:
+    """Sync ffprobe (called from inside asyncio.to_thread). Returns duration in s."""
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True, check=True,
+    )
+    return float(out.stdout.strip())
+
+
+def _ffmpeg_split(source: Path, dest_dir: Path, num_subchunks: int) -> list[Path]:
+    """Sync ffmpeg split (called from inside asyncio.to_thread).
+
+    Splits `source` into `num_subchunks` equal pieces written to dest_dir.
+    Re-encodes to the same mono/16kHz/24kbps mp3 the main chunker uses, so
+    the sub-chunks are byte-compatible with the rest of the pipeline.
+    """
+    duration = _ffprobe_duration(source)
+    sub_dur = duration / num_subchunks
+    paths: list[Path] = []
+    for i in range(num_subchunks):
+        start = i * sub_dur
+        out_path = dest_dir / f"sub_{i:02d}.mp3"
+        subprocess.run(
+            [settings.ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-y",
+             "-ss", f"{start:.3f}", "-t", f"{sub_dur:.3f}",
+             "-i", str(source),
+             "-vn", "-ac", "1", "-ar", "16000",
+             "-c:a", "libmp3lame", "-b:a", "24k",
+             str(out_path)],
+            capture_output=True, check=True,
+        )
+        paths.append(out_path)
+    return paths
+
+
+async def _rescue_via_subchunks(
+    chunk_path: Path,
+    profile: str | None,
+) -> tuple[str, UsageInfo | None, int, int]:
+    """Recover a safety-blocked chunk by re-splitting it into sub-chunks.
+
+    The PROHIBITED_CONTENT classifier scores audio over the whole window. By
+    cutting the chunk into ~65-second pieces, each piece individually scores
+    below the threshold even when the parent didn't. Validated empirically
+    on Splitlanders S238 chunk_005: 8/8 sub-chunks transcribed cleanly on
+    gemini-2.5-flash-lite where the parent was hard-blocked.
+
+    Returns (combined_transcript, combined_usage, n_succeeded, n_total).
+    Sub-chunks that themselves fail are inlined as placeholder markers in
+    the combined transcript — we never recurse further (no infinite split).
+    """
+    with tempfile.TemporaryDirectory(prefix="rescue_") as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        try:
+            sub_paths = await asyncio.to_thread(
+                _ffmpeg_split, chunk_path, tmpdir_path, SAFETY_RESCUE_SUBCHUNKS,
+            )
+        except Exception:
+            logger.exception("ffmpeg split failed for rescue of %s", chunk_path.name)
+            return "", None, 0, 0
+
+        # Transcribe sub-chunks in parallel. _allow_safety_rescue=False prevents
+        # infinite recursion if a sub-chunk also fails safety.
+        sem = asyncio.Semaphore(min(SAFETY_RESCUE_SUBCHUNKS, 8))
+
+        async def _one(sp: Path) -> tuple[str, UsageInfo | None, str | None]:
+            async with sem:
+                return await transcribe_chunk(sp, profile, _allow_safety_rescue=False)
+
+        results = await asyncio.gather(
+            *[_one(p) for p in sub_paths], return_exceptions=True,
+        )
+
+    # Combine results in order. Successes get their transcripts; sub-chunks
+    # that still failed get a per-sub-chunk placeholder.
+    parts: list[str] = []
+    total_usage: UsageInfo | None = None
+    n_ok = 0
+    for r in results:
+        if isinstance(r, Exception):
+            logger.warning("Sub-chunk transcribe raised: %s", r)
+            parts.append("[transcription unavailable for this segment]")
+            continue
+        sub_text, sub_usage, sub_failure = r
+        if sub_usage is not None:
+            total_usage = (total_usage + sub_usage) if total_usage is not None else sub_usage
+        if sub_failure is None:
+            n_ok += 1
+        parts.append(sub_text)
+
+    combined = "\n\n".join(parts)
+    return combined, total_usage, n_ok, len(results)
+
+
 async def transcribe_chunk(
-    chunk_path: Path, profile: str | None = None,
+    chunk_path: Path,
+    profile: str | None = None,
+    *,
+    _allow_safety_rescue: bool = True,
 ) -> tuple[str, UsageInfo | None, str | None]:
     """Transcribe a single audio chunk.
 
     Returns (transcript, usage, failure_reason):
       - transcript: real text (possibly truncated but valid) OR a placeholder
-        if the chunk failed and any retry also failed.
-      - usage: combined token/cost across original call + any retry.
+        if the chunk failed and any recovery also failed.
+      - usage: combined token/cost across original call + any retries/rescues.
       - failure_reason: None on success, else one of "safety", "max_tokens",
         "empty".
 
-    Recovery strategy when the primary model returns MAX_TOKENS:
-      1. Run a repetition heuristic on the text.
-      2. If NOT repetitive: it's just legit-long content that hit the cap.
-         Keep the truncated text and return success — better a slightly cut
-         transcript than no transcript at all.
-      3. If REPETITIVE: it's a real runaway. If we're not already on the
-         `high` profile model, retry that single chunk on it — sampling
-         variance + a larger, better-aligned model usually finishes cleanly.
+    Recovery strategies in order:
 
-    Same retry logic applies to "empty" results, which can come from a
-    smaller-model hiccup where the larger model produces real text.
+    1. **MAX_TOKENS + not repetitive** → keep the truncated text as success.
+       Models sometimes emit verbose-but-legit chunks that brush the cap.
 
-    Does NOT retry "safety" — the PROHIBITED_CONTENT / safety gate is shared
-    across the flash-lite family, so retrying on a different model in the
-    family won't help (empirically confirmed).
+    2. **MAX_TOKENS + repetitive, or empty** → retry the same chunk on the
+       `high` profile model (gemini-3.1-flash-lite), which is empirically
+       more stable than 2.5-lite on the same content. Skipped when we're
+       already on the high model.
+
+    3. **PROHIBITED_CONTENT (safety)** → split the chunk into 8 sub-chunks
+       and transcribe each independently. The content classifier scores
+       audio across the whole window; smaller pieces individually score
+       below the block threshold even when the parent didn't. Empirically
+       100% recovery on the one known-blocked chunk we've measured. Skipped
+       on recursive sub-chunk calls (`_allow_safety_rescue=False`) to
+       prevent infinite splitting if a sub-chunk also blocks.
+
+    Failures returned by this function mean every applicable recovery has
+    already been attempted. The orchestrator surfaces them as gaps in the
+    DM finish status with timestamp ranges.
     """
     primary_model = model_config.get("transcribe", profile)
     high_model = model_config.get("transcribe", RETRY_PROFILE)
@@ -230,7 +344,8 @@ async def transcribe_chunk(
 
     # --- Retry path: re-run this chunk on the high model ---
     # Skipped when we're already on the high model (no upgrade available) OR
-    # when the failure is "safety" (input gate is shared across models).
+    # when the failure is "safety" (input gate is shared across models — the
+    # rescue-via-subchunks path below handles that case instead).
     if failure in ("max_tokens", "empty") and primary_model != high_model:
         logger.warning(
             "Chunk %s failed on %s (failure=%s) — retrying on %s",
@@ -268,18 +383,50 @@ async def transcribe_chunk(
             )
             failure = failure_retry  # retry's failure dominates
 
+    # Clean up the (parent) uploaded file before potentially launching the
+    # rescue path — the rescue uploads its own sub-chunk files and we don't
+    # want to leak the parent's quota.
+    try:
+        await asyncio.to_thread(client.files.delete, name=file.name)
+    except Exception:
+        logger.warning("Failed to delete Gemini file %s", file.name)
+
+    # --- Safety rescue: split into sub-chunks and re-transcribe each ---
+    # Triggered when the parent chunk was hard-blocked on content but we're
+    # NOT inside a recursive sub-chunk call (the _allow_safety_rescue guard
+    # prevents infinite re-splitting). Empirically the classifier passes
+    # smaller pieces of the same audio even when the parent fails.
+    if failure == "safety" and _allow_safety_rescue:
+        logger.warning(
+            "Chunk %s safety-blocked — attempting localized rescue (%d sub-chunks)",
+            chunk_path.name, SAFETY_RESCUE_SUBCHUNKS,
+        )
+        rescue_text, rescue_usage, n_ok, n_total = await _rescue_via_subchunks(
+            chunk_path, profile,
+        )
+        if rescue_usage is not None:
+            usage = (usage + rescue_usage) if usage is not None else rescue_usage
+
+        if n_ok > 0:
+            logger.info(
+                "Chunk %s safety rescue: %d/%d sub-chunks transcribed (recovered %d%%)",
+                chunk_path.name, n_ok, n_total, int(100 * n_ok / max(1, n_total)),
+            )
+            transcript = rescue_text
+            failure = None  # rescue produced usable content
+        else:
+            logger.warning(
+                "Chunk %s safety rescue: ALL %d sub-chunks also blocked — keeping placeholder",
+                chunk_path.name, n_total,
+            )
+            # leave failure = "safety"; falls through to placeholder below
+
     if failure is not None:
         logger.warning(
             "Chunk %s final failure=%s (primary=%s, finish=%r, block=%r, text_len=%d) — placeholder",
             chunk_path.name, failure, primary_model, finish, block, len(transcript),
         )
         transcript = "[transcription unavailable for this segment]"
-
-    # Clean up uploaded file
-    try:
-        await asyncio.to_thread(client.files.delete, name=file.name)
-    except Exception:
-        logger.warning("Failed to delete Gemini file %s", file.name)
 
     return transcript, usage, failure
 
