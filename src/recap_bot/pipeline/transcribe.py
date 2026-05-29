@@ -239,7 +239,7 @@ async def _rescue_via_subchunks(
         # infinite recursion if a sub-chunk also fails safety.
         sem = asyncio.Semaphore(min(SAFETY_RESCUE_SUBCHUNKS, 8))
 
-        async def _one(sp: Path) -> tuple[str, UsageInfo | None, str | None]:
+        async def _one(sp: Path):
             async with sem:
                 return await transcribe_chunk(sp, profile, _allow_safety_rescue=False)
 
@@ -248,7 +248,8 @@ async def _rescue_via_subchunks(
         )
 
     # Combine results in order. Successes get their transcripts; sub-chunks
-    # that still failed get a per-sub-chunk placeholder.
+    # that still failed get a per-sub-chunk placeholder. (recovery_action
+    # from sub-chunks is discarded — only the chunk-level summary matters.)
     parts: list[str] = []
     total_usage: UsageInfo | None = None
     n_ok = 0
@@ -257,7 +258,7 @@ async def _rescue_via_subchunks(
             logger.warning("Sub-chunk transcribe raised: %s", r)
             parts.append("[transcription unavailable for this segment]")
             continue
-        sub_text, sub_usage, sub_failure = r
+        sub_text, sub_usage, sub_failure, _sub_recovery = r
         if sub_usage is not None:
             total_usage = (total_usage + sub_usage) if total_usage is not None else sub_usage
         if sub_failure is None:
@@ -273,15 +274,23 @@ async def transcribe_chunk(
     profile: str | None = None,
     *,
     _allow_safety_rescue: bool = True,
-) -> tuple[str, UsageInfo | None, str | None]:
+) -> tuple[str, UsageInfo | None, str | None, str | None]:
     """Transcribe a single audio chunk.
 
-    Returns (transcript, usage, failure_reason):
+    Returns (transcript, usage, failure_reason, recovery_action):
       - transcript: real text (possibly truncated but valid) OR a placeholder
-        if the chunk failed and any recovery also failed.
-      - usage: combined token/cost across original call + any retries/rescues.
+        if the chunk failed and all recovery paths also failed.
+      - usage: combined token/cost across the primary call + any retries/rescues.
       - failure_reason: None on success, else one of "safety", "max_tokens",
         "empty".
+      - recovery_action: None if the primary call succeeded cleanly. Else a
+        short tag describing what saved this chunk:
+          * "truncated_kept"            — MAX_TOKENS but not repetitive; text kept
+          * "retry_high"                — recovered by re-running on the high model
+          * "subchunk_rescue:N/M"       — recovered by re-splitting into M sub-chunks
+                                          (N of M transcribed cleanly; partial when N<M)
+        The orchestrator surfaces these in the DM finish status alongside
+        gaps so the user can see what actually happened on tricky chunks.
 
     Recovery strategies in order:
 
@@ -302,8 +311,7 @@ async def transcribe_chunk(
        prevent infinite splitting if a sub-chunk also blocks.
 
     Failures returned by this function mean every applicable recovery has
-    already been attempted. The orchestrator surfaces them as gaps in the
-    DM finish status with timestamp ranges.
+    already been attempted.
     """
     primary_model = model_config.get("transcribe", profile)
     high_model = model_config.get("transcribe", RETRY_PROFILE)
@@ -326,6 +334,7 @@ async def transcribe_chunk(
     # --- First attempt on the user's selected profile model ---
     transcript, usage, finish, block = await _generate(client, primary_model, refreshed)
     failure = _classify(transcript, finish, block)
+    recovery_action: str | None = None
 
     # MAX_TOKENS: distinguish real runaway from legit-long content.
     if failure == "max_tokens":
@@ -341,6 +350,7 @@ async def transcribe_chunk(
                 chunk_path.name, primary_model, len(transcript),
             )
             failure = None  # soft-truncated success
+            recovery_action = "truncated_kept"
 
     # --- Retry path: re-run this chunk on the high model ---
     # Skipped when we're already on the high model (no upgrade available) OR
@@ -376,6 +386,7 @@ async def transcribe_chunk(
             )
             transcript = t2
             failure = None
+            recovery_action = "retry_high"
         else:
             logger.warning(
                 "Chunk %s retry on %s also failed (failure=%s, finish=%r, block=%r)",
@@ -414,6 +425,7 @@ async def transcribe_chunk(
             )
             transcript = rescue_text
             failure = None  # rescue produced usable content
+            recovery_action = f"subchunk_rescue:{n_ok}/{n_total}"
         else:
             logger.warning(
                 "Chunk %s safety rescue: ALL %d sub-chunks also blocked — keeping placeholder",
@@ -428,11 +440,11 @@ async def transcribe_chunk(
         )
         transcript = "[transcription unavailable for this segment]"
 
-    return transcript, usage, failure
+    return transcript, usage, failure, recovery_action
 
 
 async def transcribe_audio(
     audio_path: Path, profile: str | None = None,
-) -> tuple[str, UsageInfo | None, str | None]:
+) -> tuple[str, UsageInfo | None, str | None, str | None]:
     """Transcribe a full audio file (single chunk)."""
     return await transcribe_chunk(audio_path, profile)

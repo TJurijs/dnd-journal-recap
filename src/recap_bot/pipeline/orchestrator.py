@@ -431,9 +431,13 @@ async def run_job(bot, category_id: int) -> None:
 
         total_chunks = len(chunk_paths)
         transcript_parts: list[str | None] = [None] * total_chunks
-        # Failures surfaced to the user in the DM finish status with absolute
-        # VOD timestamps. Each entry is (idx, start_sec, end_sec, reason).
+        # Failures (post all recovery attempts) surfaced as gaps in the DM
+        # finish status. Each entry: (idx, start_sec, end_sec, reason).
         chunk_failures: list[tuple[int, float, float, str]] = []
+        # Successful recoveries — chunks that needed a fallback path to land
+        # cleanly. Surfaced in the DM finish status under "✨ Recovered" so
+        # the user can see what actually happened on tricky chunks.
+        chunk_recoveries: list[tuple[int, float, float, str]] = []
         completed_count = 0
 
         # All 20 chunks fire in parallel (one Gemini call per chunk).
@@ -441,25 +445,33 @@ async def run_job(bot, category_id: int) -> None:
 
         async def _bounded_transcribe(idx: int, chunk_path: Path):
             async with semaphore:
-                part, usage, failure = await transcribe_chunk(chunk_path, profile)
-                return idx, part, usage, failure
+                part, usage, failure, recovery = await transcribe_chunk(chunk_path, profile)
+                return idx, part, usage, failure, recovery
 
         tasks = [asyncio.create_task(_bounded_transcribe(i, cp)) for i, cp in enumerate(chunk_paths)]
 
         for coro in asyncio.as_completed(tasks):
-            idx, part, usage, failure = await coro
+            idx, part, usage, failure, recovery = await coro
             transcript_parts[idx] = part
+            start = idx * chunk_duration_sec
+            end = (idx + 1) * chunk_duration_sec
             if failure is not None:
-                start = idx * chunk_duration_sec
-                end = (idx + 1) * chunk_duration_sec
                 chunk_failures.append((idx, start, end, failure))
                 logger.warning(
                     "Transcribe gap on chunk %d (%.1f-%.1fs): %s",
                     idx, start, end, failure,
                 )
+            if recovery is not None:
+                chunk_recoveries.append((idx, start, end, recovery))
+                logger.info(
+                    "Transcribe recovery on chunk %d (%.1f-%.1fs): %s",
+                    idx, start, end, recovery,
+                )
             completed_count += 1
             pct = int(completed_count / total_chunks * 100)
             note = f"{completed_count}/{total_chunks} chunks"
+            if chunk_recoveries:
+                note += f", {len(chunk_recoveries)} recovered"
             if chunk_failures:
                 note += f", {len(chunk_failures)} gap(s)"
             _mark_ui(
@@ -472,6 +484,8 @@ async def run_job(bot, category_id: int) -> None:
 
         transcript = "\n\n".join(part for part in transcript_parts if part)
         done_note = f"{total_chunks} chunks"
+        if chunk_recoveries:
+            done_note += f", {len(chunk_recoveries)} recovered"
         if chunk_failures:
             done_note += f", {len(chunk_failures)} gap(s)"
         _mark_ui(
@@ -581,6 +595,7 @@ async def run_job(bot, category_id: int) -> None:
             total_cost=cost_tracker.format_total(),
             changes=changes,
             chunk_failures=chunk_failures,
+            chunk_recoveries=chunk_recoveries,
         )
 
     except asyncio.CancelledError:
@@ -664,6 +679,45 @@ def _format_chunk_failures(failures: list[tuple[int, float, float, str]], total:
     return "\n".join(lines)
 
 
+def _format_recovery_label(action: str) -> str:
+    """Map a recovery_action tag to a user-readable label.
+
+    `subchunk_rescue:N/M` is parsed and re-rendered with explicit counts so
+    the user can see whether the rescue was full (N==M) or partial (N<M).
+    """
+    if action == "truncated_kept":
+        return "kept truncated text (output cap reached, content non-repetitive)"
+    if action == "retry_high":
+        return "succeeded on retry with `high` model (default profile looped or returned empty)"
+    if action.startswith("subchunk_rescue:"):
+        try:
+            n_ok_s, n_total_s = action.split(":", 1)[1].split("/", 1)
+            n_ok, n_total = int(n_ok_s), int(n_total_s)
+            if n_ok == n_total:
+                return f"safety-blocked → re-split into {n_total} sub-windows, **all recovered**"
+            blocked = n_total - n_ok
+            return (
+                f"safety-blocked → re-split into {n_total} sub-windows, "
+                f"**{n_ok} recovered** ({blocked} still blocked)"
+            )
+        except Exception:
+            return action
+    return action
+
+
+def _format_chunk_recoveries(recoveries: list[tuple[int, float, float, str]], total: int = 20) -> str:
+    """Render the recovered-chunk list as a Discord message section.
+
+    Empty string when nothing was recovered — clean recaps don't show this.
+    """
+    if not recoveries:
+        return ""
+    lines = [f"✨ **Recovered ({len(recoveries)}/{total} chunks):**"]
+    for idx, start, end, action in sorted(recoveries):
+        lines.append(f"• `{_format_ts(start)} – {_format_ts(end)}` — {_format_recovery_label(action)}")
+    return "\n".join(lines)
+
+
 async def _finish_status(
     bot, user_id: int, category_id: int,
     *,
@@ -672,6 +726,7 @@ async def _finish_status(
     total_cost: str = "",
     changes: str = "",
     chunk_failures: list[tuple[int, float, float, str]] | None = None,
+    chunk_recoveries: list[tuple[int, float, float, str]] | None = None,
 ) -> None:
     msg = _status_msgs.pop(category_id, None)
     if not msg:
@@ -679,6 +734,7 @@ async def _finish_status(
     job = state.get(category_id)
     title = (job.title if job else "") or f"Recap (channel {category_id})"
     failures_text = _format_chunk_failures(chunk_failures or [])
+    recoveries_text = _format_chunk_recoveries(chunk_recoveries or [])
     try:
         if success:
             where = (
@@ -690,6 +746,9 @@ async def _finish_status(
         else:
             header = f"❌ **{title} failed:**\n{error[:1000]}"
         text = _build_status_text(category_id, total_cost=total_cost, header=header)
+        # Recoveries above gaps — wins first, then anything we couldn't save.
+        if recoveries_text:
+            text += f"\n\n{recoveries_text}"
         if failures_text:
             text += f"\n\n{failures_text}"
         if changes:
@@ -710,6 +769,8 @@ async def _finish_status(
                     content = f"❌ {title} failed: {error[:1000]}"
                 if total_cost:
                     content += f"\n💰 Total API cost: {total_cost}"
+                if recoveries_text:
+                    content += f"\n\n{recoveries_text}"
                 if failures_text:
                     content += f"\n\n{failures_text}"
                 if changes and success:
