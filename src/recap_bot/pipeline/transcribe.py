@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from pathlib import Path
 
 from google import genai
@@ -82,6 +83,18 @@ def _classify(transcript: str, finish: str, block: str) -> str | None:
     return None
 
 
+# Match `[HH:MM:SS]` or `[MM:SS]` (with any surrounding whitespace) so we can
+# strip them before repetition matching. Loop iterations carry unique
+# timestamps but identical content — keeping the timestamps would make every
+# tail window byte-different from its head copy and defeat the heuristic.
+_TIMESTAMP_RE = re.compile(r"\s*\[\d{1,2}:\d{2}(?::\d{2})?\]\s*")
+
+
+def _normalize_for_repetition(text: str) -> str:
+    """Strip timestamp prefixes so repetition matching compares content only."""
+    return _TIMESTAMP_RE.sub(" ", text)
+
+
 def _looks_repetitive(
     text: str,
     *,
@@ -93,22 +106,26 @@ def _looks_repetitive(
 ) -> bool:
     """Heuristic: True if `text` is degenerating (re-emitting earlier content).
 
-    Walks the last `tail_frac` of the text in overlapping `window`-char chunks
-    and checks how many also appear in the first `1 - tail_frac` portion. If
-    a majority of tail windows are repeats, the model is looping.
+    Strips timestamps first (they're unique per iteration even when content is
+    identical), then walks the last `tail_frac` of the text in overlapping
+    `window`-char chunks and checks how many also appear in the first
+    `1 - tail_frac` portion. If a majority of tail windows are repeats, the
+    model is looping.
 
     Designed to catch loops that line-level repetition checks miss — chunk_008
     on gemini-2.5-flash-lite emitted all output as a single line with
     `[HH:MM:SS] Speaker A:` interleaved sentences, so line-counting found
-    nothing. Sliding-window substring matching catches it.
+    nothing. Sliding-window substring matching on normalized (timestamp-free)
+    text catches it.
 
     Returns False for short text where the heuristic is unreliable.
     """
-    if len(text) < min_text_len:
+    norm = _normalize_for_repetition(text)
+    if len(norm) < min_text_len:
         return False
-    cutoff = int(len(text) * (1 - tail_frac))
-    head = text[:cutoff]
-    tail = text[cutoff:]
+    cutoff = int(len(norm) * (1 - tail_frac))
+    head = norm[:cutoff]
+    tail = norm[cutoff:]
     if len(tail) < window * 2:
         return False
     repeats = 0
