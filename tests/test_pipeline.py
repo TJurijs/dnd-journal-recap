@@ -448,6 +448,86 @@ def test_cost_tracker_add_handles_none_and_empty_list():
     assert t.total_cost_usd == 0.0
 
 
+# ----- Journal length cap: _trim_to_section_boundary -----
+
+def _make_long_journal(n_scenes: int = 8, words_per_bullet: int = 80) -> str:
+    title = "# Splitlanders, Session 238\n\n"
+    sdate = "## Session Date: 12th of Winter\n\n"
+    body = " ".join(f"word{j}" for j in range(words_per_bullet))
+    scenes = [f"## Scene {i}\n- {body}\n- {body}\n" for i in range(1, n_scenes + 1)]
+    return title + sdate + "\n".join(scenes)
+
+
+def test_trim_to_section_boundary_caps_length():
+    from recap_bot.pipeline.summarize import _trim_to_section_boundary
+    journal = _make_long_journal()
+    assert len(journal) > 4000  # sanity
+    trimmed = _trim_to_section_boundary(journal, 4000)
+    assert len(trimmed) <= 4000
+    # Cut at a `## ` boundary → no half-scene left dangling; marker appended.
+    assert trimmed.rstrip().endswith("post)_")
+    assert "## Session Date" in trimmed  # leading context preserved
+    assert trimmed.startswith("# Splitlanders")
+
+
+def test_trim_to_section_boundary_under_limit_is_identity():
+    from recap_bot.pipeline.summarize import _trim_to_section_boundary
+    short = "# T\n\n## Scene 1\n- short content here"
+    assert _trim_to_section_boundary(short, 4000) == short
+
+
+def test_trim_to_section_boundary_hard_cuts_oversized_first_section():
+    from recap_bot.pipeline.summarize import _trim_to_section_boundary
+    # First (only) section alone exceeds the budget → fall back to hard cut.
+    huge = "## Scene 1\n" + ("x" * 5000)
+    trimmed = _trim_to_section_boundary(huge, 4000)
+    assert len(trimmed) <= 4000
+
+
+# ----- Embed body extraction + builders -----
+
+def test_body_for_embed_strips_leading_title():
+    from recap_bot.storage.discord_journals import _body_for_embed
+    journal = "# Session 238\n\n## Session Date: Winter\n\n## Scene 1\n- thing happened"
+    body = _body_for_embed(journal)
+    assert not body.startswith("# Session 238")
+    assert body.startswith("## Session Date")
+
+
+def test_body_for_embed_no_title_unchanged():
+    from recap_bot.storage.discord_journals import _body_for_embed
+    journal = "## Session Date: Winter\n\n## Scene 1\n- thing"
+    assert _body_for_embed(journal).startswith("## Session Date")
+
+
+def test_render_embed_description_within_discord_limit():
+    from recap_bot.storage.discord_journals import render_journal_embed
+    journal = "# T\n\n" + ("## Scene\n- " + "x" * 200 + "\n") * 30
+    embed = render_journal_embed(journal, date="Winter")
+    assert len(embed.description) <= 4096
+    assert embed.footer.text == "Winter"
+
+
+def test_codeblock_embed_wraps_in_md_fence_and_fits():
+    from recap_bot.storage.discord_journals import codeblock_journal_embed
+    journal = "# T\n\n## Scene 1\n- thing happened in the tavern"
+    embed = codeblock_journal_embed(journal)
+    assert embed.description.startswith("```md\n")
+    assert embed.description.rstrip().endswith("```")
+    assert len(embed.description) <= 4096
+    # The raw markdown syntax must survive inside the code block.
+    assert "## Scene 1" in embed.description
+
+
+def test_codeblock_embed_respects_description_limit_on_huge_input():
+    from recap_bot.storage.discord_journals import codeblock_journal_embed
+    journal = "# T\n\n" + ("## Scene\n- " + "x" * 200 + "\n") * 40  # way over 4096
+    embed = codeblock_journal_embed(journal)
+    assert len(embed.description) <= 4096
+    assert embed.description.startswith("```md\n")
+    assert embed.description.rstrip().endswith("```")
+
+
 # ----- _looks_repetitive: tells runaway loops from legit-long content -----
 
 def _make_clean_transcript(n_lines: int = 60) -> str:

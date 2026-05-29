@@ -9,6 +9,7 @@ def build_summarize_prompt(
     scratchpad: Optional[str],
     style: str,
     transcript: str,
+    max_chars: int = 4000,
 ) -> str:
     lines = [
         "You are a chronicler producing a session journal for an ongoing D&D campaign.",
@@ -39,7 +40,11 @@ def build_summarize_prompt(
         "- If a speaker's name is unclear, use a placeholder like [Player 1] or [DM].\n"
         "- Capture: key story beats, combat highlights, NPCs introduced, loot, decisions made, cliffhangers.\n"
         "- Omit out-of-character chatter, rules debates, and breaks.\n"
-        "- Output Markdown."
+        "- Output Markdown.\n"
+        f"- HARD LENGTH LIMIT: the entire journal MUST be under {max_chars} characters "
+        f"(including all Markdown). This is a strict cap so the recap fits in a single "
+        f"Discord post. If the session was eventful, prioritize the most important "
+        f"4-6 scenes and keep each bullet tight — do NOT exceed {max_chars} characters."
     )
 
     lines.append("")

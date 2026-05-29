@@ -63,6 +63,66 @@ def format_header(title: str) -> str:
     return f"**{cleaned}**" if cleaned else "**Recap**"
 
 
+# --- Embed-based display -------------------------------------------------
+# The journal content is delivered TWO ways in one message:
+#   1. The `.md` attachment — the machine-readable source of truth. Re-ingestion
+#      (list_for_channel / fetch_content) reads this, and /recap_edit swaps it.
+#      Embeds are NEVER read back, so the attachment must always be present.
+#   2. An embed — purely for human display. Standard recaps render the markdown
+#      (pretty); silent recaps wrap it in a ```md code block (copy-paste keeps
+#      the markdown syntax).
+# The 4000-char journal cap (see pipeline.summarize.MAX_JOURNAL_CHARS) keeps the
+# body within Discord's 4096-char embed-description limit, so one embed suffices.
+
+EMBED_COLOR = 0x9B59B6  # purple — magical without being garish
+_EMBED_DESC_LIMIT = 4096
+_SESSION_DATE_RE = re.compile(r"##\s*Session Date:\s*(.+?)(?:\n|$)", re.IGNORECASE)
+
+
+def _body_for_embed(journal_md: str) -> str:
+    """Strip a leading `# Title` heading from the journal body.
+
+    The title is shown in the message content header (`**Title**`) above the
+    embed, so repeating it as an `# H1` inside the embed would be redundant.
+    Everything else (including the `## Session Date` line and all scenes) stays.
+    """
+    text = journal_md.lstrip()
+    if text.startswith("# "):
+        parts = text.split("\n", 1)
+        text = parts[1] if len(parts) > 1 else ""
+    return text.strip()
+
+
+def render_journal_embed(journal_md: str, *, date: str = "") -> "discord.Embed":
+    """Rendered embed (markdown interpreted) — used for STANDARD channel posts."""
+    body = _body_for_embed(journal_md)
+    embed = discord.Embed(description=body[:_EMBED_DESC_LIMIT], color=EMBED_COLOR)
+    if date:
+        embed.set_footer(text=date)
+    return embed
+
+
+def codeblock_journal_embed(journal_md: str, *, date: str = "") -> "discord.Embed":
+    """Code-block embed (raw markdown shown) — used for SILENT DM delivery.
+
+    Wrapping the body in a ```md fenced block means Discord shows the literal
+    `##`, `**`, `-` syntax instead of rendering it. Selecting + copying then
+    preserves the markdown, so the user can paste it into notes/wiki/etc. and
+    have it re-render.
+    """
+    body = _body_for_embed(journal_md)
+    # Reserve room for the fences within the 4096 cap. "```md\n" = 6 chars and
+    # "\n```" = 4 chars = 10; reserve 12 for a small safety margin.
+    fence_overhead = 12
+    inner = body[: _EMBED_DESC_LIMIT - fence_overhead]
+    embed = discord.Embed(description=f"```md\n{inner}\n```", color=EMBED_COLOR)
+    footer = "Copy the text above to reuse it with Markdown formatting"
+    if date:
+        footer = f"{date} · {footer}"
+    embed.set_footer(text=footer)
+    return embed
+
+
 # Discord MessageType values that represent real user/bot content (not system
 # notifications like joins, pins, thread-created, etc.)
 _USER_CONTENT_TYPES = {discord.MessageType.default, discord.MessageType.reply}
@@ -185,11 +245,14 @@ async def post_journal(
 
     header = format_header(title)
     file = discord.File(BytesIO(journal_md.encode("utf-8")), filename=filename)
+    # Rendered embed for in-channel readability (no download needed). The .md
+    # attachment is kept as the machine-readable source for re-ingestion + edit.
+    embed = render_journal_embed(journal_md, date=date)
     # Persistent "✏️ Edit" button so anyone with Manage Channels can re-run
     # /recap_edit for this specific recap.
     from recap_bot.commands._edit_button import make_edit_view
     view = make_edit_view("journal", vod_id)
-    msg = await channel.send(content=header, file=file, view=view)
+    msg = await channel.send(content=header, embed=embed, file=file, view=view)
     return msg.id
 
 
@@ -219,7 +282,15 @@ async def dm_journal(
 
     header = format_header(title)
     file = discord.File(BytesIO(journal_md.encode("utf-8")), filename=filename)
-    await user.send(content=f"🤫 **Silent recap** (not posted in the channel):\n{header}", file=file)
+    # Code-block embed so the user can select + copy the raw markdown and paste
+    # it elsewhere with formatting intact. The .md attachment is also included
+    # for download/archive.
+    embed = codeblock_journal_embed(journal_md, date=date)
+    await user.send(
+        content=f"🤫 **Silent recap** (not posted in the channel):\n{header}",
+        embed=embed,
+        file=file,
+    )
 
 
 async def edit_journal_message(
@@ -254,9 +325,17 @@ async def edit_journal_message(
     filename = existing_md.filename if existing_md else "recap.md"
 
     file = discord.File(BytesIO(new_md_bytes), filename=filename)
+    # Rebuild the rendered embed from the new content so the visible embed stays
+    # in lockstep with the swapped attachment. Recap_edit only operates on
+    # channel posts (which are always the rendered/standard variant), so we
+    # rebuild the rendered embed here. Parse the Session Date for the footer.
+    new_text = new_md_bytes.decode("utf-8", errors="replace")
+    date_match = _SESSION_DATE_RE.search(new_text)
+    date = date_match.group(1).strip() if date_match else ""
+    embed = render_journal_embed(new_text, date=date)
     # Omitting content= and view= keeps them unchanged; attachments=[file]
-    # replaces the entire attachment list with just our new file.
-    await msg.edit(attachments=[file])
+    # replaces the attachment list, embeds=[embed] replaces the embed list.
+    await msg.edit(attachments=[file], embeds=[embed])
     return msg.id
 
 
