@@ -51,7 +51,24 @@ async def transcribe_chunk(chunk_path: Path, profile: str | None = None) -> tupl
 
     transcript = response.text or ""
     if not transcript:
-        raise RuntimeError("Gemini returned empty transcript for chunk")
+        # Don't kill the whole recap on one bad chunk. An empty response can
+        # come from real silence in the chunk, a safety-filter trip, or a flaky
+        # moment from the smaller transcribe model (the cheaper `default`
+        # profile uses gemini-2.5-flash-lite, which is more prone to this than
+        # `high`). Log the finish_reason and substitute a placeholder so 19/20
+        # good chunks still produce a recap.
+        reason = ""
+        try:
+            cand = (response.candidates or [None])[0]
+            reason = str(getattr(cand, "finish_reason", "") or "")
+        except Exception:
+            pass
+        logger.warning(
+            "Empty transcript for %s (model=%s, finish_reason=%r) — substituting placeholder",
+            chunk_path.name, model, reason,
+        )
+        note = f" (finish_reason={reason})" if reason and reason.lower() not in ("stop", "finish_reason_unspecified") else ""
+        transcript = f"[transcription unavailable for this segment{note}]"
 
     usage = extract_usage(response, model)
 
