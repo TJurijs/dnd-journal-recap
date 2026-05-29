@@ -392,3 +392,59 @@ def test_extract_usage_tags_model():
     assert u.input_tokens == 100
     assert u.output_tokens == 50
     assert u.model == "gemini-3.1-pro-preview"
+
+
+# ----- _looks_repetitive: tells runaway loops from legit-long content -----
+
+def _make_clean_transcript(n_lines: int = 60) -> str:
+    """Synthesize a transcript with no repetition — every line unique."""
+    return "\n".join(
+        f"[00:{i // 60:02d}:{i % 60:02d}] Speaker {chr(65 + (i % 4))}: "
+        f"Discussing topic {i} which involves character {chr(65 + (i % 26))} "
+        f"taking action {i * 7 % 100} in the {['tavern', 'dungeon', 'forest', 'castle'][i % 4]}."
+        for i in range(n_lines)
+    )
+
+
+def test_looks_repetitive_clean_long_transcript_returns_false():
+    """A normal long transcript with varied content should NOT register as a loop."""
+    from recap_bot.pipeline.transcribe import _looks_repetitive
+    text = _make_clean_transcript(100)
+    assert len(text) > 5000  # sanity: it's long enough to be interesting
+    assert _looks_repetitive(text) is False
+
+
+def test_looks_repetitive_detects_sentence_level_loop():
+    """The chunk_008 failure mode: same sentence emitted repeatedly with
+    different timestamp prefixes, all on one line (no newlines).
+    """
+    from recap_bot.pipeline.transcribe import _looks_repetitive
+    # Realistic varied lead-in, then a 50× repeat of the same sentence.
+    head = " ".join(
+        f"[00:00:{i:02d}] Speaker A: Different content at time {i} about topic {i}."
+        for i in range(30)
+    )
+    loop_sentence = "I was short. I didn't bring enough gold to buy what I wanted. "
+    loop = " ".join(f"[00:09:{i:02d}] Speaker A: {loop_sentence}" for i in range(50))
+    text = head + " " + loop
+    assert _looks_repetitive(text) is True
+
+
+def test_looks_repetitive_short_text_returns_false():
+    """Heuristic should bail (False) for too-short input — too few windows
+    to be reliable."""
+    from recap_bot.pipeline.transcribe import _looks_repetitive
+    assert _looks_repetitive("hello world") is False
+    assert _looks_repetitive("") is False
+    assert _looks_repetitive("a" * 100) is False  # under min_text_len
+
+
+def test_looks_repetitive_mostly_unique_with_occasional_repetition():
+    """Mild natural repetition (common phrases, e.g. 'Yeah.') should NOT
+    flag as a loop — threshold is 50% of tail windows."""
+    from recap_bot.pipeline.transcribe import _looks_repetitive
+    base = _make_clean_transcript(80)
+    # Sprinkle a few "Yeah." lines among the unique content — these would
+    # match each other but only contribute a tiny fraction of windows.
+    extra = "\n".join("[00:30:00] Speaker B: Yeah." for _ in range(5))
+    assert _looks_repetitive(base + "\n" + extra) is False
