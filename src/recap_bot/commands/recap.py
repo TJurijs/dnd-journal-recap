@@ -112,6 +112,7 @@ async def recap(
         channel_id=post_channel_id,
         guild_id=guild_id or 0,
         requested_by=interaction.user.id,
+        requested_by_name=interaction.user.display_name,
         source_type=source_type,
         source_ref=url,
         style=style_value,

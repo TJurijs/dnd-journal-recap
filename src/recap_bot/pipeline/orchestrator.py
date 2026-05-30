@@ -627,7 +627,11 @@ async def run_job(bot, category_id: int) -> None:
         # Usage log (best-effort) — record what this recap cost, for /admin log.
         try:
             guild = bot.get_guild(job.guild_id) if job.guild_id else None
+            # Prefer the name captured from the interaction at claim time — the
+            # job runs long after the interaction, so bot.get_user() here often
+            # misses the cache and would log an empty name.
             user = bot.get_user(job.requested_by)
+            user_name = job.requested_by_name or (str(user) if user else "")
             usage_log.log_event(
                 event="recap",
                 status=job.status,
@@ -636,9 +640,11 @@ async def run_job(bot, category_id: int) -> None:
                 category_id=job.category_id,
                 location=job.channel_label,
                 user_id=job.requested_by,
-                user_name=str(user) if user else "",
+                user_name=user_name,
                 profile=job.profile,
                 vod_id=job.vod_id,
+                vod_title=job.title,
+                source_url=job.source_ref,
                 cost_usd=cost_tracker.total_cost_usd,
             )
         except Exception:

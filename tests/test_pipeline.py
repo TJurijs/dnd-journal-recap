@@ -580,6 +580,38 @@ def test_roundtrip_embed_body_recovers_journal():
     assert "the party fought a dragon" in recovered
 
 
+# ----- /admin log: video link reconstruction -----
+
+def test_vod_url_prefers_stored_source_url():
+    from recap_bot.commands.admin import _vod_url
+    e = {"source_url": "https://www.twitch.tv/foo/videos/2783329200", "vod_id": "2783329200"}
+    assert _vod_url(e) == "https://www.twitch.tv/foo/videos/2783329200"
+
+
+def test_vod_url_reconstructs_twitch_from_numeric_id():
+    """Old entries (no source_url) — numeric VOD id → Twitch link."""
+    from recap_bot.commands.admin import _vod_url
+    assert _vod_url({"vod_id": "2783329200"}) == "https://www.twitch.tv/videos/2783329200"
+
+
+def test_vod_url_reconstructs_youtube_from_alphanumeric_id():
+    """Old entries (no source_url) — alphanumeric VOD id → YouTube link."""
+    from recap_bot.commands.admin import _vod_url
+    assert _vod_url({"vod_id": "dQw4w9WgXcQ"}) == "https://youtu.be/dQw4w9WgXcQ"
+
+
+def test_vod_url_empty_for_non_video_event():
+    """Initialize events have no VOD → no link."""
+    from recap_bot.commands.admin import _vod_url
+    assert _vod_url({"vod_id": ""}) == ""
+    assert _vod_url({}) == ""
+
+
+def test_md_link_text_sanitizes_brackets():
+    from recap_bot.commands.admin import _md_link_text
+    assert _md_link_text("Session [238] — recap\n") == "Session (238) — recap"
+
+
 # ----- _looks_repetitive: tells runaway loops from legit-long content -----
 
 def _make_clean_transcript(n_lines: int = 60) -> str:

@@ -31,6 +31,7 @@ class ActiveJob:
     vod_id: str = ""                   # VOD id (Twitch numeric or YouTube alphanum), parsed from source_ref
     title: str = ""                    # VOD title, for status display
     channel_label: str = ""            # "Category / channel-name" of the post channel
+    requested_by_name: str = ""        # requester display name, captured at claim time (for usage log)
     force: bool = False                # wipe cached audio/chunks before running
     profile: str = "default"           # models.yaml profile this job uses
     silent: bool = False               # deliver journal via DM to requester, don't post in channel
@@ -49,6 +50,7 @@ def claim(
     source_ref: str,
     style: str,
     channel_label: str = "",
+    requested_by_name: str = "",
     force: bool = False,
     profile: str = "default",
     silent: bool = False,
@@ -66,6 +68,7 @@ def claim(
         source_ref=source_ref,
         style=style,
         channel_label=channel_label,
+        requested_by_name=requested_by_name,
         force=force,
         profile=profile,
         silent=silent,

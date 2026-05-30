@@ -147,23 +147,68 @@ async def admin_restart(interaction: discord.Interaction):
     asyncio.create_task(_restart_after(3.0))
 
 
+def _vod_url(e: dict) -> str:
+    """Best link to the source video: the stored URL, else reconstruct from the
+    VOD id (numeric → Twitch, alphanumeric → YouTube) for entries logged before
+    source_url was recorded."""
+    url = (e.get("source_url") or "").strip()
+    if url:
+        return url
+    vod_id = (e.get("vod_id") or "").strip()
+    if not vod_id:
+        return ""
+    return (
+        f"https://www.twitch.tv/videos/{vod_id}" if vod_id.isdigit()
+        else f"https://youtu.be/{vod_id}"
+    )
+
+
+def _resolve_user(e: dict) -> str:
+    """Human-readable requester: live cache lookup → stored name → raw id."""
+    uid = e.get("user_id")
+    if uid is not None and str(uid).isdigit():
+        u = bot.get_user(int(uid))
+        if u is not None:
+            return u.display_name
+    return (e.get("user_name") or "").strip() or (str(uid) if uid else "?")
+
+
+def _md_link_text(title: str) -> str:
+    """Sanitize a title for use inside a [text](url) masked link."""
+    return title.replace("[", "(").replace("]", ")").replace("\n", " ").strip()
+
+
 def _fmt_event(e: dict) -> str:
     ts = (e.get("ts") or "")[:16].replace("T", " ")
     icon = _STATUS_ICON.get(e.get("status", ""), "•")
     guild = e.get("guild_name") or e.get("guild_id") or "?"
     loc = e.get("location") or "?"
     cmd = e.get("event") or "?"
-    user = e.get("user_name") or e.get("user_id") or "?"
+    user = _resolve_user(e)
     profile = e.get("profile") or "?"
     cost = e.get("cost_usd")
     cost_str = f"${cost:.4f}" if isinstance(cost, (int, float)) else "$—"
     bf = " _(backfill)_" if e.get("backfilled") else ""
-    return f"{icon} `{ts}` · **{guild}** · {loc} · /{cmd} · {user} · `{profile}` · **{cost_str}**{bf}"
+    line1 = (
+        f"{icon} `{ts}` · **{guild}** · {loc} · /{cmd} · "
+        f"**{user}** · `{profile}` · **{cost_str}**{bf}"
+    )
+    # Video line (recaps only — initialize has no VOD). Inside an embed, a
+    # masked [title](url) link renders as a clickable name with no preview.
+    url = _vod_url(e)
+    title = _md_link_text(e.get("vod_title") or e.get("vod_id") or "")
+    if url and title:
+        return f"{line1}\n↳ 📺 [{title}]({url})"
+    if url:
+        return f"{line1}\n↳ 📺 {url}"
+    if title:
+        return f"{line1}\n↳ 📺 {title}"
+    return line1
 
 
-@admin_group.command(name="log", description="Recent usage: when, server, channel, command, user, cost")
-@app_commands.describe(limit="How many recent events to show (default 15, max 30)")
-async def admin_log(interaction: discord.Interaction, limit: int = 15):
+@admin_group.command(name="log", description="Recent usage: when, server, channel, user, video, cost")
+@app_commands.describe(limit="How many recent events to show (default 12, max 30)")
+async def admin_log(interaction: discord.Interaction, limit: int = 12):
     if not await _is_owner(interaction):
         return
     limit = max(1, min(limit, 30))
@@ -175,16 +220,18 @@ async def admin_log(interaction: discord.Interaction, limit: int = 15):
         )
         return
     total = sum(e["cost_usd"] for e in events if isinstance(e.get("cost_usd"), (int, float)))
-    lines = [f"📊 **Last {len(events)} event(s)** — known-cost total **${total:.4f}**", ""]
-    lines += [_fmt_event(e) for e in events]
-    text = "\n".join(lines)
-    if len(text) <= 1990:
-        await interaction.response.send_message(text, ephemeral=True)
+    title = f"📊 Last {len(events)} event(s) — known-cost total ${total:.4f}"
+    body = "\n\n".join(_fmt_event(e) for e in events)
+    # Embeds allow 4096-char descriptions AND render masked links (so the video
+    # name is clickable). Fall back to a plain-text file only if it overflows.
+    if len(body) <= 4096:
+        embed = discord.Embed(title=title[:256], description=body, color=0x9B59B6)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
     else:
         from io import BytesIO
         await interaction.response.send_message(
-            f"📊 Last {len(events)} events (attached — total ${total:.4f}):",
-            file=discord.File(BytesIO(text.encode("utf-8")), filename="usage_log.txt"),
+            f"{title} (attached — too many events to render inline; links not clickable in the file):",
+            file=discord.File(BytesIO(body.encode("utf-8")), filename="usage_log.txt"),
             ephemeral=True,
         )
 

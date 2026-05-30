@@ -55,6 +55,8 @@ def log_event(
     user_name: str = "",
     profile: str = "",
     vod_id: str = "",
+    vod_title: str = "",        # VOD title (the video name)
+    source_url: str = "",       # the URL the user pasted (Twitch/YouTube link)
     cost_usd: float = 0.0,
 ) -> None:
     """Append one usage event. Never raises."""
@@ -71,6 +73,8 @@ def log_event(
             "user_name": user_name,
             "profile": profile,
             "vod_id": vod_id,
+            "vod_title": vod_title,
+            "source_url": source_url,
             "cost_usd": round(float(cost_usd), 6),
         }
         path = _log_path()
