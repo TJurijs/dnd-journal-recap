@@ -67,8 +67,14 @@ it into a throwaway `python3` script (the pattern used all session). Always
 `python3 -c "import ast; ast.parse(open('file.py').read())"` before pushing.
 
 **Config changes on the server** (`.env`, `models.yaml`, `prices.yaml`) are
-applied with `/admin restart` (or `docker compose up -d --force-recreate`).
-A plain `docker compose restart` does **not** reload `.env`.
+applied with **`/admin restart`**. This works because those three files are
+**bind-mounted** into the container (see `docker-compose.yml`) and read fresh on
+each process start — `/admin restart` does `os._exit(0)`, the restart policy
+brings the container back, and it re-reads the current files. ⚠️ Do **not**
+re-add `env_file: .env` to compose: it would inject `.env` as env vars at
+container-create (which take precedence over the bind-mounted file in Pydantic)
+and silently break live reload — you'd be back to needing a full
+`docker compose up -d --force-recreate`.
 
 ### ⚠️ Gotchas that have bitten us
 - **`docker compose up -d --build` (recreate) WIPES `docker logs`.** Step-logs

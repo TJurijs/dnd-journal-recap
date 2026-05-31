@@ -3,7 +3,15 @@ services:
     build: .
     container_name: dnd-recap-bot
     restart: unless-stopped
-    env_file: .env
+    # IMPORTANT: we deliberately do NOT use `env_file: .env`. Env vars injected
+    # at container-create can't change without recreating the container, so
+    # editing `.env` wouldn't take effect on a plain restart. Instead `.env` is
+    # bind-mounted (below) and read by Pydantic at runtime — so a simple process
+    # restart (what `/admin restart` does via os._exit + the restart policy)
+    # re-reads the CURRENT file. Same for models.yaml / prices.yaml. This is the
+    # whole reason `/admin restart` can apply server-side config edits.
+    # (Do NOT re-add `env_file: .env` — it would shadow the bind-mounted file
+    # with stale injected values and silently break live reload.)
     environment:
       # Force DATA_DIR=/data inside the container regardless of what `.env`
       # says — `.env` typically has `DATA_DIR=./data` for non-Docker local
@@ -12,6 +20,12 @@ services:
       DATA_DIR: /data
     volumes:
       - ./data:/data
+      # Live config — host edits take effect on the next `/admin restart`
+      # (read-only: the bot only reads these). Requires the host files to exist
+      # (they do: .env is maintained on the server; the yamls come from git).
+      - ./.env:/app/.env:ro
+      - ./models.yaml:/app/models.yaml:ro
+      - ./prices.yaml:/app/prices.yaml:ro
     logging:
       driver: json-file
       options:

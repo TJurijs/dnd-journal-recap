@@ -47,7 +47,13 @@ async def _is_owner(interaction: discord.Interaction) -> bool:
 async def _restart_after(delay: float) -> None:
     """Sleep, then hard-exit. Docker's `restart: unless-stopped` brings the
     container back, re-running on_ready (which re-syncs commands) and reloading
-    .env / models.yaml / prices.yaml from disk."""
+    .env / models.yaml / prices.yaml from disk.
+
+    The config reload works ONLY because those files are bind-mounted into the
+    container (see docker-compose.yml) rather than injected as env vars / baked
+    into the image. A fresh process re-reads the current host files. If someone
+    re-adds `env_file: .env` to compose, .env edits would stop taking effect
+    here (the injected env var would shadow the bind-mounted file)."""
     await asyncio.sleep(delay)
     logger.warning("Restarting process via os._exit(0) for /admin restart")
     os._exit(0)
